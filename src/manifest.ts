@@ -8,7 +8,7 @@ const DESCRIPTION =
   "or across the whole fleet, read/write/edit remote files — all through native " +
   "SSH in Peckboard core (keys stay in memory). Ships a live activity dashboard " +
   "showing every command per-host and across all hosts.";
-const VERSION = "0.1.0";
+const VERSION = "0.1.1";
 const REPOSITORY = "https://github.com/PeckBoard/ssh-fleet";
 
 // Inline SVG (lucide "server") for the sidebar entry; rendered sandboxed.
@@ -26,6 +26,12 @@ export function manifestJson(): string {
     description: DESCRIPTION,
     version: VERSION,
     repository: REPOSITORY,
+
+    // SSH work is slow by nature: connect (up to the 120s connect_timeout
+    // ceiling) plus a command that may legitimately run for ssh_run's 600s
+    // cap. Without this, the extism default 2s budget traps the instance on
+    // the first real call. Core clamps to its MAX_CALL_TIMEOUT (610s).
+    call_timeout_secs: 610,
 
     hooks: ["mcp.tool.invoke", "http.request.before", "http.request.authed"],
 
