@@ -6,8 +6,8 @@
 import { htmlResponse, jsonResponse, errMsg } from "./verdict";
 import { PAGE } from "./page";
 import { listHosts, redact, saveHostFromInput, resolveHost, deleteHost } from "./hosts";
+import { listActivity } from "./activity";
 import { runSync, probeSync } from "./tools";
-import { sshRun, sshProbeTool } from "./tools";
 
 const PAGE_PATH = "/plugin-api/v1/ssh-fleet";
 const API = "/api/plugin-ui/ssh-fleet";

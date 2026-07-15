@@ -306,4 +306,34 @@ describe("dashboard run/probe routes", () => {
     const result = JSON.parse(resp.payload.body);
     expect(result).toMatchObject({ host: "web1", ok: true, server_fingerprint: "SHA256:y", latency_ms: 12 });
   });
+
+  it("a dashboard run appears in the activity feed", () => {
+    installHost({ hosts: { h1: pwHost("h1", "web1", "10.0.0.1", "s3cret") } }, {}, {
+      exec: () => ({
+        ok: true,
+        exit_code: 0,
+        stdout: "Steam\nanaconda-ks.cfg",
+        stderr: "",
+        stdout_truncated: false,
+        stderr_truncated: false,
+        timed_out: false,
+        server_fingerprint: "x",
+        started_at: "t",
+        finished_at: "t",
+        duration_ms: 3,
+      }),
+    });
+    serveAuthed({
+      method: "POST",
+      path: "/api/plugin-ui/ssh-fleet/run",
+      query: "",
+      body: JSON.stringify({ host: "web1", command: "ls" }),
+    });
+    const resp = JSON.parse(
+      serveAuthed({ method: "GET", path: "/api/plugin-ui/ssh-fleet/activity", query: "host=h1&since=0", body: "" }),
+    );
+    const feed = JSON.parse(resp.payload.body);
+    expect(feed.items).toHaveLength(1);
+    expect(feed.items[0]).toMatchObject({ tool: "ssh_run", host_id: "h1", host_label: "web1", exit_code: 0 });
+  });
 });
