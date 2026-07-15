@@ -8,7 +8,7 @@ const DESCRIPTION =
   "or across the whole fleet, read/write/edit remote files — all through native " +
   "SSH in Peckboard core (keys stay in memory). Ships a live activity dashboard " +
   "showing every command per-host and across all hosts.";
-const VERSION = "0.1.1";
+const VERSION = "0.2.0";
 const REPOSITORY = "https://github.com/PeckBoard/ssh-fleet";
 
 // Inline SVG (lucide "server") for the sidebar entry; rendered sandboxed.

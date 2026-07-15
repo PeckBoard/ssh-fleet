@@ -1,0 +1,245 @@
+import { describe, it, expect, beforeEach } from "vitest";
+import { dispatch } from "../src/lib";
+import { defer, deferReq, isDeferReq } from "../src/verdict";
+
+// ── Pure verdict helpers ─────────────────────────────────────────────────────
+
+describe("defer verdict", () => {
+  it("serializes a defer verdict", () => {
+    expect(JSON.parse(defer({ kind: "exec" }, { id: "h1" }))).toEqual({
+      verdict: "defer",
+      op: { kind: "exec" },
+      resume: { id: "h1" },
+    });
+  });
+
+  it("deferReq round-trips through isDeferReq", () => {
+    expect(isDeferReq(deferReq({ kind: "probe" }, { id: "h1" }))).toBe(true);
+    expect(isDeferReq({ foo: 1 })).toBe(false);
+    expect(isDeferReq(null)).toBe(false);
+  });
+});
+
+// ── In-memory Host/Memory shim ───────────────────────────────────────────────
+//
+// The tool logic drives the plugin document-store + settings host functions.
+// This shim backs them with a plain object so the phase-1 emit and phase-2
+// finalize paths run under vitest without an Extism runtime (mirrors how the
+// real host functions marshal JSON through Memory offsets).
+
+type Store = Record<string, Record<string, any>>;
+
+function installHost(store: Store, settings: Record<string, any> = {}): Store {
+  const bufs = new Map<bigint, string>();
+  let next = 1n;
+  const put = (s: string): bigint => {
+    const off = next++;
+    bufs.set(off, s);
+    return off;
+  };
+  const read = (off: bigint) => JSON.parse(bufs.get(off)!);
+  const fns: Record<string, (off: bigint) => bigint> = {
+    peckboard_get_plugin_setting: (off) => put(JSON.stringify({ value: settings[read(off).key] ?? null })),
+    peckboard_store_get: (off) => {
+      const { collection, key } = read(off);
+      return put(JSON.stringify({ value: store[collection]?.[key] ?? null }));
+    },
+    peckboard_store_put: (off) => {
+      const { collection, key, data } = read(off);
+      (store[collection] ||= {})[key] = data;
+      return put(JSON.stringify({ ok: true }));
+    },
+    peckboard_store_list: (off) => {
+      const { collection } = read(off);
+      const items = Object.entries(store[collection] ?? {}).map(([key, value]) => ({ key, value }));
+      return put(JSON.stringify({ items }));
+    },
+    peckboard_store_delete: (off) => {
+      const { collection, key } = read(off);
+      if (store[collection]) delete store[collection][key];
+      return put(JSON.stringify({ ok: true }));
+    },
+  };
+  (globalThis as any).Host = { getFunctions: () => fns };
+  (globalThis as any).Memory = {
+    fromString: (s: string) => ({ offset: put(s) }),
+    find: (off: bigint) => ({ readString: () => bufs.get(off)! }),
+  };
+  return store;
+}
+
+const pwHost = (id: string, label: string, host: string, secret: string) => ({
+  id,
+  label,
+  hostname: host,
+  port: 22,
+  username: "root",
+  auth_kind: "password",
+  password: secret,
+  last_status: "unknown",
+});
+
+const invoke = (payload: any) => JSON.parse(dispatch("mcp.tool.invoke", payload));
+
+// ── ssh_run ──────────────────────────────────────────────────────────────────
+
+describe("ssh_run defer protocol", () => {
+  let store: Store;
+  beforeEach(() => {
+    store = installHost({ hosts: { h1: pwHost("h1", "web1", "10.0.0.1", "s3cret") } });
+  });
+
+  it("phase 1 emits an exec defer carrying the connection + resume", () => {
+    const v = invoke({ tool: "ssh_run", arguments: { host: "web1", command: "uptime", timeout_secs: 5 } });
+    expect(v.verdict).toBe("defer");
+    expect(v.op).toMatchObject({
+      kind: "exec",
+      host: "10.0.0.1",
+      port: 22,
+      username: "root",
+      command: "uptime",
+      timeout_secs: 5,
+      auth: { password: "s3cret" },
+    });
+    expect(v.resume).toEqual({ id: "h1", label: "web1", command: "uptime" });
+  });
+
+  it("finalize turns a core op_result into the tool result and logs activity", () => {
+    const v = invoke({
+      tool: "ssh_run",
+      arguments: { host: "web1", command: "uptime" },
+      resume: { id: "h1", label: "web1", command: "uptime" },
+      op_result: {
+        ok: true,
+        exit_code: 0,
+        stdout: "up 3 days",
+        stderr: "",
+        stdout_truncated: false,
+        stderr_truncated: false,
+        timed_out: false,
+        server_fingerprint: "SHA256:aaa",
+        finished_at: "2026-07-15T00:00:00Z",
+        duration_ms: 12,
+      },
+    });
+    expect(v.verdict).toBe("allow");
+    expect(v.payload).toMatchObject({ host: "web1", host_id: "h1", exit_code: 0, stdout: "up 3 days", timed_out: false });
+    expect(store.hosts.h1.last_status).toBe("ok");
+    expect(store.hosts.h1.last_fingerprint).toBe("SHA256:aaa");
+    const activity = Object.values(store.activity ?? {});
+    expect(activity.length).toBe(1);
+    expect(activity[0]).toMatchObject({ tool: "ssh_run", host_id: "h1", ok: true, exit_code: 0 });
+  });
+
+  it("finalize surfaces an error op_result as a tool error and records failure", () => {
+    const v = invoke({
+      tool: "ssh_run",
+      arguments: { host: "web1", command: "boom" },
+      resume: { id: "h1", label: "web1", command: "boom" },
+      op_result: { error: "connect failed: timed out" },
+    });
+    expect(v.verdict).toBe("allow");
+    expect(v.payload.error).toContain("connect failed");
+    expect(store.hosts.h1.last_status).toBe("error");
+    expect(store.hosts.h1.last_error).toContain("connect failed");
+  });
+});
+
+// ── ssh_run_many ─────────────────────────────────────────────────────────────
+
+describe("ssh_run_many defer protocol", () => {
+  let store: Store;
+  beforeEach(() => {
+    store = installHost({
+      hosts: {
+        h1: pwHost("h1", "web1", "10.0.0.1", "a"),
+        h2: pwHost("h2", "web2", "10.0.0.2", "b"),
+      },
+    });
+  });
+
+  it("phase 1 emits a batch op over all targets", () => {
+    const v = invoke({ tool: "ssh_run_many", arguments: { all: true, command: "hostname" } });
+    expect(v.verdict).toBe("defer");
+    expect(v.op.kind).toBe("batch");
+    expect(v.op.ops).toHaveLength(2);
+    expect(v.op.ops.every((o: any) => o.kind === "exec" && o.command === "hostname")).toBe(true);
+    expect(v.resume.targets).toHaveLength(2);
+  });
+
+  it("finalize maps per-host results in order, collecting failures", () => {
+    const v = invoke({
+      tool: "ssh_run_many",
+      arguments: { all: true, command: "hostname" },
+      resume: {
+        command: "hostname",
+        targets: [
+          { id: "h1", label: "web1" },
+          { id: "h2", label: "web2" },
+        ],
+      },
+      op_result: {
+        results: [
+          {
+            ok: true,
+            exit_code: 0,
+            stdout: "web1",
+            stderr: "",
+            stdout_truncated: false,
+            stderr_truncated: false,
+            timed_out: false,
+            server_fingerprint: "SHA256:1",
+            finished_at: "t",
+            duration_ms: 1,
+          },
+          { error: "auth failed" },
+        ],
+      },
+    });
+    expect(v.verdict).toBe("allow");
+    expect(v.payload.count).toBe(2);
+    expect(v.payload.ok_count).toBe(1);
+    expect(v.payload.results[0]).toMatchObject({ host: "web1", ok: true, exit_code: 0, stdout: "web1" });
+    expect(v.payload.results[1]).toMatchObject({ host: "web2", ok: false, error: "auth failed" });
+  });
+});
+
+// ── ssh_edit_file (two-stage defer: read → write) ────────────────────────────
+
+describe("ssh_edit_file two-stage defer", () => {
+  beforeEach(() => {
+    installHost({ hosts: { h1: pwHost("h1", "web1", "10.0.0.1", "a") } });
+  });
+
+  it("phase 1 defers a read", () => {
+    const v = invoke({ tool: "ssh_edit_file", arguments: { host: "web1", path: "/etc/motd", find: "old", replace: "new" } });
+    expect(v.verdict).toBe("defer");
+    expect(v.op).toMatchObject({ kind: "read_file", path: "/etc/motd" });
+    expect(v.resume).toMatchObject({ stage: "read", path: "/etc/motd", find: "old", replace: "new" });
+  });
+
+  it("read finalize applies the edit and defers a write", () => {
+    const current = Buffer.from("hello old world", "utf8").toString("base64");
+    const v = invoke({
+      tool: "ssh_edit_file",
+      arguments: {},
+      resume: { stage: "read", id: "h1", label: "web1", path: "/etc/motd", find: "old", replace: "new" },
+      op_result: { ok: true, content_base64: current, size: 15, truncated: false, server_fingerprint: "x", finished_at: "t" },
+    });
+    expect(v.verdict).toBe("defer");
+    expect(v.op.kind).toBe("write_file");
+    expect(Buffer.from(v.op.content_base64, "base64").toString("utf8")).toBe("hello new world");
+    expect(v.resume).toMatchObject({ stage: "write", replacements: 1 });
+  });
+
+  it("write finalize returns the result", () => {
+    const v = invoke({
+      tool: "ssh_edit_file",
+      arguments: {},
+      resume: { stage: "write", id: "h1", label: "web1", path: "/etc/motd", replacements: 1 },
+      op_result: { ok: true, bytes: 15, server_fingerprint: "x", finished_at: "t" },
+    });
+    expect(v.verdict).toBe("allow");
+    expect(v.payload).toMatchObject({ host: "web1", path: "/etc/motd", bytes: 15, replacements: 1 });
+  });
+});

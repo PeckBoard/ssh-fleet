@@ -15,6 +15,31 @@ export function allow(value: unknown): string {
 export function cancel(reason: string): string {
   return JSON.stringify({ verdict: "cancel", reason });
 }
+/// A `Verdict::Defer`: hand `op` to core to run with the plugin instance FREE
+/// (so a slow SSH op doesn't hold the single-instance lock), plus an opaque
+/// `resume` value core echoes back. Core re-enters `handle` with the original
+/// payload plus `{resume, op_result}` for the finalize phase.
+export function defer(op: unknown, resume: unknown): string {
+  return JSON.stringify({ verdict: "defer", op, resume });
+}
+
+/// A phase-1 tool's request to defer: `handleInvoke` turns this into a
+/// `defer()` verdict. Kept as an in-process sentinel (never serialized as-is)
+/// so tool handlers can stay plain functions.
+export interface DeferReq {
+  __defer__: { op: unknown; resume: unknown };
+}
+
+/// Build a [`DeferReq`] sentinel.
+export function deferReq(op: unknown, resume: unknown): DeferReq {
+  return { __defer__: { op, resume } };
+}
+
+/// Is `v` a [`DeferReq`] sentinel (vs a plain tool result)?
+export function isDeferReq(v: unknown): v is DeferReq {
+  return typeof v === "object" && v !== null && "__defer__" in v;
+}
+
 
 /// Wrap a JSON value as a `Verdict::Allow` HTTP response.
 export function jsonResponse(status: number, value: unknown): string {
