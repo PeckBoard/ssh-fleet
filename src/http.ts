@@ -6,7 +6,7 @@
 import { htmlResponse, jsonResponse, errMsg } from "./verdict";
 import { PAGE } from "./page";
 import { listHosts, redact, saveHostFromInput, resolveHost, deleteHost } from "./hosts";
-import { listActivity } from "./activity";
+import { runSync, probeSync } from "./tools";
 import { sshRun, sshProbeTool } from "./tools";
 
 const PAGE_PATH = "/plugin-api/v1/ssh-fleet";
@@ -62,11 +62,11 @@ export function serveAuthed(payload: any): string {
     }
     if (method === "POST" && path === `${API}/probe`) {
       const b = parseBody(body);
-      return jsonResponse(200, sshProbeTool({ host: b?.host }));
+      return jsonResponse(200, probeSync({ host: b?.host }));
     }
     if (method === "POST" && path === `${API}/run`) {
       const b = parseBody(body);
-      return jsonResponse(200, sshRun({ host: b?.host, command: b?.command, timeout_secs: b?.timeout_secs }));
+      return jsonResponse(200, runSync({ host: b?.host, command: b?.command, timeout_secs: b?.timeout_secs }));
     }
   } catch (e) {
     return jsonResponse(400, { error: errMsg(e) });

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { dispatch } from "../src/lib";
 import { defer, deferReq, isDeferReq } from "../src/verdict";
+import { serveAuthed } from "../src/http";
 
 // ── Pure verdict helpers ─────────────────────────────────────────────────────
 
@@ -29,7 +30,11 @@ describe("defer verdict", () => {
 
 type Store = Record<string, Record<string, any>>;
 
-function installHost(store: Store, settings: Record<string, any> = {}): Store {
+function installHost(
+  store: Store,
+  settings: Record<string, any> = {},
+  ssh: { exec?: (input: any) => any; probe?: (input: any) => any } = {},
+): Store {
   const bufs = new Map<bigint, string>();
   let next = 1n;
   const put = (s: string): bigint => {
@@ -59,6 +64,10 @@ function installHost(store: Store, settings: Record<string, any> = {}): Store {
       if (store[collection]) delete store[collection][key];
       return put(JSON.stringify({ ok: true }));
     },
+    peckboard_ssh_exec: (off) =>
+      put(JSON.stringify(ssh.exec ? ssh.exec(read(off)) : { error: "no ssh_exec mock" })),
+    peckboard_ssh_probe: (off) =>
+      put(JSON.stringify(ssh.probe ? ssh.probe(read(off)) : { error: "no ssh_probe mock" })),
   };
   (globalThis as any).Host = { getFunctions: () => fns };
   (globalThis as any).Memory = {
@@ -241,5 +250,60 @@ describe("ssh_edit_file two-stage defer", () => {
     });
     expect(v.verdict).toBe("allow");
     expect(v.payload).toMatchObject({ host: "web1", path: "/etc/motd", bytes: 15, replacements: 1 });
+  });
+});
+
+// ── Dashboard HTTP routes run synchronously (NOT via defer) ─────────────────
+//
+// Regression: /run and /probe are request/response and don't go through the
+// core defer loop, so they must return a real result — not a `deferReq`
+// sentinel, which rendered "exit undefined" on the dashboard.
+
+describe("dashboard run/probe routes", () => {
+  it("POST /run returns a real exec result, not a defer sentinel", () => {
+    installHost({ hosts: { h1: pwHost("h1", "web1", "10.0.0.1", "s3cret") } }, {}, {
+      exec: () => ({
+        ok: true,
+        exit_code: 0,
+        stdout: "hi",
+        stderr: "",
+        stdout_truncated: false,
+        stderr_truncated: false,
+        timed_out: false,
+        server_fingerprint: "SHA256:x",
+        started_at: "t",
+        finished_at: "t",
+        duration_ms: 5,
+      }),
+    });
+    const resp = JSON.parse(
+      serveAuthed({
+        method: "POST",
+        path: "/api/plugin-ui/ssh-fleet/run",
+        query: "",
+        body: JSON.stringify({ host: "web1", command: "echo hi" }),
+      }),
+    );
+    expect(resp.verdict).toBe("allow");
+    const result = JSON.parse(resp.payload.body);
+    expect(result.__defer__).toBeUndefined();
+    expect(result).toMatchObject({ host: "web1", host_id: "h1", exit_code: 0, stdout: "hi" });
+  });
+
+  it("POST /probe returns a real probe result", () => {
+    installHost({ hosts: { h1: pwHost("h1", "web1", "10.0.0.1", "s3cret") } }, {}, {
+      probe: () => ({ ok: true, server_fingerprint: "SHA256:y", latency_ms: 12, finished_at: "t" }),
+    });
+    const resp = JSON.parse(
+      serveAuthed({
+        method: "POST",
+        path: "/api/plugin-ui/ssh-fleet/probe",
+        query: "",
+        body: JSON.stringify({ host: "web1" }),
+      }),
+    );
+    expect(resp.verdict).toBe("allow");
+    const result = JSON.parse(resp.payload.body);
+    expect(result).toMatchObject({ host: "web1", ok: true, server_fingerprint: "SHA256:y", latency_ms: 12 });
   });
 });

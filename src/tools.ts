@@ -6,7 +6,7 @@
 // pure document-store operations and stay synchronous. Full command output goes
 // to the agent; only a capped preview is persisted to the activity log.
 
-import { getSetting } from "./host";
+import { getSetting, sshExec, sshProbe } from "./host";
 import {
   HostRecord,
   redact,
@@ -403,4 +403,72 @@ export function sshEditFileFinalize(_args: any, resume: any, res: any): any {
   const out: any = { host: resume.label, path: resume.path, bytes: res.bytes };
   if (resume.replacements !== undefined) out.replacements = resume.replacements;
   return out;
+}
+
+// ── synchronous variants for the dashboard HTTP routes ──────────────────────
+//
+// The authenticated dashboard endpoints (`POST /run`, `POST /probe`) are plain
+// request/response and do NOT go through the core defer loop, so they run SSH
+// synchronously via the host functions — exactly as the MCP tools did before
+// deferring. A dashboard-initiated run holds the instance for its duration,
+// which is fine for an explicit user action; the agent-facing MCP tools defer
+// so a long *agent* command never freezes the plugin. Returning the real result
+// here (not a `deferReq` sentinel) is what the dashboard renders.
+
+export function runSync(args: any): any {
+  const rec = resolveHost(args?.host);
+  const command = reqStr(args?.command, "command");
+  const conn = toConn(rec, defTimeout());
+  try {
+    const r = sshExec(conn, command, numOpt(args?.timeout_secs));
+    updateHostStatus(rec.id, { ok: true, fingerprint: r.server_fingerprint, at: r.finished_at });
+    logActivity({
+      ts: r.finished_at ?? null,
+      host_id: rec.id,
+      host_label: rec.label,
+      tool: "ssh_run",
+      summary: sm(command),
+      ok: r.exit_code === 0 && !r.timed_out,
+      exit_code: r.exit_code,
+      duration_ms: r.duration_ms,
+      stdout_preview: preview(r.stdout),
+      stderr_preview: preview(r.stderr),
+    });
+    return {
+      host: rec.label,
+      host_id: rec.id,
+      exit_code: r.exit_code,
+      stdout: r.stdout,
+      stderr: r.stderr,
+      stdout_truncated: r.stdout_truncated,
+      stderr_truncated: r.stderr_truncated,
+      timed_out: r.timed_out,
+      duration_ms: r.duration_ms,
+    };
+  } catch (e) {
+    recordFailure(rec.id, rec.label, "ssh_run", command, e instanceof Error ? e.message : String(e));
+    throw e;
+  }
+}
+
+export function probeSync(args: any): any {
+  const rec = resolveHost(args?.host);
+  const conn = toConn(rec, defTimeout());
+  const summary = `probe ${rec.hostname}:${rec.port}`;
+  try {
+    const r = sshProbe(conn);
+    updateHostStatus(rec.id, { ok: true, fingerprint: r.server_fingerprint, at: r.finished_at });
+    logActivity({
+      ts: r.finished_at ?? null,
+      host_id: rec.id,
+      host_label: rec.label,
+      tool: "ssh_probe",
+      summary: sm(summary),
+      ok: true,
+    });
+    return { host: rec.label, ok: true, server_fingerprint: r.server_fingerprint, latency_ms: r.latency_ms };
+  } catch (e) {
+    recordFailure(rec.id, rec.label, "ssh_probe", summary, e instanceof Error ? e.message : String(e));
+    throw e;
+  }
 }
