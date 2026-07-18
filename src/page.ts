@@ -117,6 +117,37 @@ export const PAGE = `<!doctype html>
   .formerr { color: var(--err); font-size: 12px; min-height: 16px; }
   .toast { position: fixed; bottom: 16px; right: 16px; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; z-index: 60; max-width: 420px; display: none; }
   .toast.open { display: block; }
+
+  /* ── mobile (iframe ≤760px wide, e.g. phones) ── */
+  @media (hover: none), (pointer: coarse) {
+    .host .acts { opacity: 1; }
+  }
+  @media (max-width: 760px) {
+    header { flex-wrap: wrap; gap: 8px; padding: 10px 12px; }
+    header h1 { order: 0; }
+    header .spacer { order: 1; }
+    #liveBtn { order: 2; }
+    #addBtn { order: 3; }
+    #filterCombo { order: 4; width: auto !important; flex: 1 1 100%; }
+    .summary { order: 5; flex: 1 1 100%; }
+    .layout { flex-direction: column; }
+    aside { width: auto; flex: 0 0 auto; max-height: 36vh; border-right: none; border-bottom: 1px solid var(--line); }
+    .runbar { flex-wrap: wrap; padding: 8px 12px; }
+    .runbar .combo { width: auto; flex: 1 1 100%; }
+    input, select, textarea { font-size: 16px; } /* keep iOS from zooming on focus */
+    /* feed table → stacked cards */
+    table.feed, table.feed tbody { display: block; width: 100%; }
+    table.feed thead { display: none; }
+    table.feed tr.row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+    table.feed td { display: block; width: auto; padding: 0; border-bottom: none; }
+    table.feed tr.row td:nth-child(2) { font-weight: 600; }
+    table.feed td.status { margin-left: auto; }
+    table.feed td.cmdcell { flex: 1 1 100%; order: 10; margin-top: 2px; }
+    .status .time { display: inline; margin-left: 6px; }
+    .row2 { flex-wrap: wrap; }
+    .row2 > * { flex: 1 1 140px; }
+    .toast { left: 12px; right: 12px; bottom: 12px; max-width: none; }
+  }
 </style>
 </head>
 <body>
