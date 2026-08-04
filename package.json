@@ -1,6 +1,6 @@
 {
   "name": "peckboard-ssh-fleet-plugin",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "description": "Peckboard WASM plugin — manage a fleet of SSH hosts, run commands and edit files over MCP tools, with a live activity dashboard",
   "scripts": {

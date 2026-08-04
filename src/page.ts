@@ -14,11 +14,41 @@ export const PAGE = `<!doctype html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>SSH Fleet</title>
+<script>
+  (function () {
+    var t = new URLSearchParams(location.search).get("theme");
+    if (t === "dark" || t === "light") document.documentElement.dataset.theme = t;
+  })();
+</script>
 <style>
+  /* Light is the default; dark applies via an explicit <html data-theme="dark">
+     stamp (?theme=dark|light in the iframe URL) or prefers-color-scheme, with
+     the stamp winning both ways. */
   :root {
+    --bg: #f6f8fa; --panel: #ffffff; --panel2: #eef1f5; --line: #d0d7de;
+    --fg: #1f2328; --muted: #57606a; --accent: #0969da; --accent2: #0550ae;
+    --ok: #1a7f37; --err: #cf222e; --warn: #9a6700; --idle: #6e7781;
+    --sel: #dbe9f8; --badge-bg: #ddf4ff; --badge-line: #99c9ef;
+    --shadow: 0 8px 24px rgba(140,149,159,.3); --overlay: rgba(27,31,36,.5);
+    color-scheme: light;
+  }
+  :root[data-theme="dark"] {
     --bg: #0f1419; --panel: #171d26; --panel2: #1e2631; --line: #2a333f;
     --fg: #e6edf3; --muted: #8b98a5; --accent: #4c9be8; --accent2: #2d7dd2;
     --ok: #3fb950; --err: #f85149; --warn: #d29922; --idle: #6e7681;
+    --sel: #1b2b3d; --badge-bg: #12283f; --badge-line: #1d3a58;
+    --shadow: 0 8px 24px rgba(0,0,0,.4); --overlay: rgba(0,0,0,.55);
+    color-scheme: dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1419; --panel: #171d26; --panel2: #1e2631; --line: #2a333f;
+      --fg: #e6edf3; --muted: #8b98a5; --accent: #4c9be8; --accent2: #2d7dd2;
+      --ok: #3fb950; --err: #f85149; --warn: #d29922; --idle: #6e7681;
+      --sel: #1b2b3d; --badge-bg: #12283f; --badge-line: #1d3a58;
+      --shadow: 0 8px 24px rgba(0,0,0,.4); --overlay: rgba(0,0,0,.55);
+      color-scheme: dark;
+    }
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; }
@@ -58,7 +88,7 @@ export const PAGE = `<!doctype html>
     padding: 8px 12px; border-bottom: 1px solid var(--line); cursor: pointer; display: flex; gap: 8px; align-items: flex-start;
   }
   .host:hover { background: var(--panel2); }
-  .host.active { background: #1b2b3d; }
+  .host.active { background: var(--sel); }
   .host .dot { margin-top: 4px; }
   .host .body { flex: 1; min-width: 0; }
   .host .label { font-weight: 600; }
@@ -81,7 +111,7 @@ export const PAGE = `<!doctype html>
   table.feed td { padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
   tr.row:hover { background: var(--panel2); }
   .time { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
-  .toolbadge { font-size: 10px; color: var(--accent); background: #12283f; border: 1px solid #1d3a58; border-radius: 4px; padding: 1px 5px; white-space: nowrap; }
+  .toolbadge { font-size: 10px; color: var(--accent); background: var(--badge-bg); border: 1px solid var(--badge-line); border-radius: 4px; padding: 1px 5px; white-space: nowrap; }
   .cmdcell { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
   .cmdcell .err { color: var(--err); display: block; margin-top: 2px; white-space: pre-wrap; }
   .cmdcell .out { color: var(--muted); display: block; margin-top: 2px; white-space: pre-wrap; }
@@ -92,14 +122,14 @@ export const PAGE = `<!doctype html>
   .combo { position: relative; }
   .combo .menu {
     position: absolute; z-index: 20; left: 0; right: 0; top: calc(100% + 2px); max-height: 260px; overflow: auto;
-    background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 8px 24px rgba(0,0,0,.4); display: none;
+    background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; box-shadow: var(--shadow); display: none;
   }
   .combo .menu.open { display: block; }
   .combo .opt { padding: 6px 10px; cursor: pointer; }
-  .combo .opt:hover, .combo .opt.hi { background: #1b2b3d; }
+  .combo .opt:hover, .combo .opt.hi { background: var(--sel); }
   .combo .opt .sub { color: var(--muted); font-size: 11px; }
   /* modal */
-  .backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; align-items: center; justify-content: center; z-index: 50; }
+  .backdrop { position: fixed; inset: 0; background: var(--overlay); display: none; align-items: center; justify-content: center; z-index: 50; }
   .backdrop.open { display: flex; }
   .modal { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; width: 460px; max-width: 92vw; max-height: 90vh; overflow: auto; }
   .modal h2 { margin: 0; padding: 14px 16px; border-bottom: 1px solid var(--line); font-size: 14px; }
