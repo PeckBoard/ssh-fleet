@@ -3,12 +3,13 @@
 // sidebar entry, and the settings schema.
 
 const DESCRIPTION =
-  "SSH Fleet: hold connection details for many SSH hosts (user + password or " +
-  "user + private key) and drive them over MCP tools — run commands on one host " +
-  "or across the whole fleet, read/write/edit remote files — all through native " +
-  "SSH in Peckboard core (keys stay in memory). Ships a live activity dashboard " +
-  "showing every command per-host and across all hosts.";
-const VERSION = "0.2.4";
+  "SSH Fleet: hold connection details for many SSH hosts (user + a key from " +
+  "Peckboard's SSH key vault, or an inline password / private key) and drive them " +
+  "over MCP tools — run commands on one host or across the whole fleet, " +
+  "read/write/edit remote files — all through native SSH in Peckboard core (keys " +
+  "stay in memory). Ships a live activity dashboard showing every command per-host " +
+  "and across all hosts.";
+const VERSION = "0.3.0";
 const REPOSITORY = "https://github.com/PeckBoard/ssh-fleet";
 
 // Inline SVG (lucide "server") for the sidebar entry; rendered sandboxed.
@@ -38,6 +39,7 @@ export function manifestJson(): string {
     permissions: [
       "provide_mcp_tools", // the ssh_* MCP tools
       "ssh", // peckboard_ssh_probe / _exec / _read_file / _write_file
+      "ssh_keys", // peckboard_ssh_key_list + auth by vault key id (never key material)
       "data_store", // host registry + activity log
       "user_authority", // serve the authenticated dashboard data routes
       "contribute_sidebar", // the SSH Fleet sidebar page
@@ -52,6 +54,7 @@ export function manifestJson(): string {
 
     ui_routes: [
       "GET /api/plugin-ui/ssh-fleet/hosts",
+      "GET /api/plugin-ui/ssh-fleet/ssh-keys",
       "POST /api/plugin-ui/ssh-fleet/hosts",
       "POST /api/plugin-ui/ssh-fleet/host-remove",
       "GET /api/plugin-ui/ssh-fleet/activity",
@@ -75,10 +78,11 @@ export function manifestJson(): string {
       {
         name: "ssh_host_add",
         description:
-          "Register a new SSH host in the fleet. Provide a hostname and username plus EITHER a " +
-          "password OR a private_key (OpenSSH/PEM text, with an optional passphrase). Returns the " +
-          "stored host (credentials are never echoed back). Give it a friendly label and tags to " +
-          "make it easy to target later.",
+          "Register a new SSH host in the fleet. Provide a hostname and username plus EXACTLY ONE " +
+          "credential: a key_id from Peckboard's SSH key vault (preferred — the plugin then stores no " +
+          "key material at all), a password, or an inline private_key (OpenSSH/PEM text, with an " +
+          "optional passphrase). Returns the stored host (credentials are never echoed back). Give it " +
+          "a friendly label and tags to make it easy to target later.",
         input_schema: {
           type: "object",
           properties: {
@@ -86,6 +90,13 @@ export function manifestJson(): string {
             hostname: { type: "string", description: "Host to connect to (DNS name or IP)." },
             port: { type: "integer", description: "SSH port. Defaults to 22." },
             username: { type: "string", description: "SSH username." },
+            key_id: {
+              type: "string",
+              description:
+                "Id of a key in Peckboard's SSH key vault — the preferred credential. The key material " +
+                "stays in core; the host record only references it. See the key_id of an existing host " +
+                "in ssh_host_list, or pick a key in the SSH Fleet dashboard.",
+            },
             password: { type: "string", description: "Password for password auth (omit if using a key)." },
             private_key: {
               type: "string",
@@ -106,7 +117,8 @@ export function manifestJson(): string {
         name: "ssh_host_update",
         description:
           "Update an existing host by id. Only the fields you pass change; omit a credential to keep " +
-          "the current one. Use ssh_host_list to find the id.",
+          "the current one. Passing key_id / password / private_key switches the host to that auth " +
+          "kind and drops the previous credential. Use ssh_host_list to find the id.",
         input_schema: {
           type: "object",
           properties: {
@@ -115,6 +127,10 @@ export function manifestJson(): string {
             hostname: { type: "string", description: "New hostname." },
             port: { type: "integer", description: "New port." },
             username: { type: "string", description: "New username." },
+            key_id: {
+              type: "string",
+              description: "Switch to a key from Peckboard's SSH key vault, by id (drops any stored credential).",
+            },
             password: { type: "string", description: "Replace with password auth." },
             private_key: { type: "string", description: "Replace with key auth (private key text)." },
             passphrase: { type: "string", description: "New key passphrase." },
@@ -138,8 +154,9 @@ export function manifestJson(): string {
       {
         name: "ssh_host_list",
         description:
-          "List the registered hosts (credentials redacted) with their last-seen status. Optionally " +
-          "filter by tag.",
+          "List the registered hosts (credentials redacted) with their last-seen status. A host " +
+          "authenticating with a vault key reports auth_kind \"key_ref\" plus its key_id and key_name. " +
+          "Optionally filter by tag.",
         input_schema: {
           type: "object",
           properties: { tag: { type: "string", description: "Only list hosts carrying this tag." } },

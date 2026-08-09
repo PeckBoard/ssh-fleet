@@ -46,10 +46,14 @@ export function storeDelete(collection: string, key: string): void {
 
 // ── SSH (ssh permission) ─────────────────────────────────────────────────────
 
-/// Password or private-key credentials passed to the ssh host functions.
+/// Credentials passed to the ssh host functions: an inline password, inline
+/// private-key text, or a REFERENCE to a key in core's SSH key vault. The
+/// `key_id` form carries no key material at all — core resolves it (and
+/// requires the `ssh_keys` permission to do so).
 export type SshAuth =
   | { password: string }
-  | { private_key: string; passphrase?: string };
+  | { private_key: string; passphrase?: string }
+  | { key_id: string };
 
 /// The connection-shaped fields every ssh host function needs.
 export interface SshConn {
@@ -115,4 +119,23 @@ export function sshWriteFile(conn: SshConn, path: string, contentBase64: string)
   finished_at: string;
 } {
   return hostCall("peckboard_ssh_write_file", { ...conn, path, content_base64: contentBase64 });
+}
+
+// ── SSH key vault (ssh_keys permission) ──────────────────────────────────────
+
+/// Metadata about one vault key. Core NEVER hands the plugin the private key,
+/// its ciphertext/nonce, or the passphrase — only this view.
+export interface SshKeyInfo {
+  id: string;
+  name: string;
+  key_type: string;
+  fingerprint: string;
+  has_passphrase: boolean;
+  created_at: string;
+}
+
+/// List the keys held in core's SSH key vault (metadata only).
+export function sshKeyList(): SshKeyInfo[] {
+  const result = hostCall("peckboard_ssh_key_list", {});
+  return result?.keys ?? [];
 }

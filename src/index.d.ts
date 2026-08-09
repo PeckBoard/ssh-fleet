@@ -18,6 +18,7 @@ declare module "extism:host" {
     peckboard_store_get(ptr: I64): I64;
     peckboard_store_list(ptr: I64): I64;
     peckboard_store_delete(ptr: I64): I64;
+    peckboard_ssh_key_list(ptr: I64): I64;
     peckboard_ssh_probe(ptr: I64): I64;
     peckboard_ssh_exec(ptr: I64): I64;
     peckboard_ssh_read_file(ptr: I64): I64;

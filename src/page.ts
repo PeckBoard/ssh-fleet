@@ -139,10 +139,14 @@ export const PAGE = `<!doctype html>
   .row2 { display: flex; gap: 10px; }
   .row2 > * { flex: 1; }
   .seg { display: flex; gap: 0; }
+  .seg { display: flex; gap: 0; }
   .seg button { border-radius: 0; flex: 1; }
   .seg button:first-child { border-radius: 6px 0 0 6px; }
-  .seg button:last-child { border-radius: 0 6px 6px 0; border-left: none; }
+  .seg button:last-child { border-radius: 0 6px 6px 0; }
+  .seg button + button { border-left: none; }
   .seg button.on { background: var(--accent2); border-color: var(--accent2); color: #fff; }
+  .hint { font-size: 11px; color: var(--muted); }
+  .legacy { background: var(--badge-bg); border: 1px solid var(--warn); color: var(--warn); border-radius: 10px; padding: 0 6px; font-size: 10px; }
   .modal .foot { padding: 12px 16px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 8px; }
   .formerr { color: var(--err); font-size: 12px; min-height: 16px; }
   .toast { position: fixed; bottom: 16px; right: 16px; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; z-index: 60; max-width: 420px; display: none; }
@@ -234,12 +238,18 @@ export const PAGE = `<!doctype html>
       <div class="field">
         <label>Auth</label>
         <div class="seg">
-          <button type="button" id="auth_pw" class="on">Password</button>
+          <button type="button" id="auth_ref" class="on">Vault key</button>
+          <button type="button" id="auth_pw">Password</button>
           <button type="button" id="auth_key">Private key</button>
         </div>
       </div>
-      <div class="field" id="pwField"><label>Password</label><input id="f_password" type="password" placeholder="••••••••" /></div>
-      <div class="field" id="keyField" style="display:none"><label>Private key (OpenSSH/PEM)</label><textarea id="f_key" rows="5" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea></div>
+      <div class="field" id="refField">
+        <label>Key from the SSH key vault (recommended)</label>
+        <select id="f_key_id"></select>
+        <span class="hint" id="refHint">The private key stays in Peckboard's vault — this plugin only stores a reference to it.</span>
+      </div>
+      <div class="field" id="pwField" style="display:none"><label>Password</label><input id="f_password" type="password" placeholder="••••••••" /></div>
+      <div class="field" id="keyField" style="display:none"><label>Private key (OpenSSH/PEM)</label><textarea id="f_key" rows="5" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea><span class="hint">Stored in this plugin's own data store. Prefer a vault key instead.</span></div>
       <div class="field" id="passField" style="display:none"><label>Key passphrase (optional)</label><input id="f_passphrase" type="password" /></div>
       <div class="field"><label>Pinned host key fingerprint (optional)</label><input id="f_known" placeholder="SHA256:…" /></div>
       <div class="formerr" id="formErr"></div>
@@ -290,7 +300,14 @@ export const PAGE = `<!doctype html>
   function el(tag, cls, text) { var n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; }
   function clear(n) { while (n.firstChild) n.removeChild(n.firstChild); }
 
-  var state = { hosts: [], byId: {}, filter: "all", cursor: 0, live: true, editing: null, authKind: "password", runHost: null };
+  var state = { hosts: [], byId: {}, keys: [], keysLoaded: false, filter: "all", cursor: 0, live: true, editing: null, authKind: "key_ref", runHost: null };
+
+  // Human label for a host's credential kind, incl. the vault key's name.
+  function authText(h) {
+    if (h.auth_kind === "key_ref") return "vault key: " + (h.key_name || h.key_id || "(missing)");
+    if (h.auth_kind === "key") return "inline private key";
+    return "password";
+  }
 
   // ── hosts ──────────────────────────────────────────────────────────
   function loadHosts() {
@@ -331,8 +348,18 @@ export const PAGE = `<!doctype html>
       row.appendChild(el("span", "dot " + (h.last_status || "unknown")));
       var body = el("div", "body");
       body.appendChild(el("div", "label", h.label));
-      body.appendChild(el("div", "sub", h.username + "@" + h.hostname + ":" + h.port + "  ·  " + h.auth_kind));
-      if ((h.tags || []).length) { var tg = el("div", "tags"); h.tags.forEach(function (t) { tg.appendChild(el("span", "tag", t)); }); body.appendChild(tg); }
+      body.appendChild(el("div", "sub", h.username + "@" + h.hostname + ":" + h.port + "  ·  " + authText(h)));
+      var tg = el("div", "tags");
+      // Legacy hosts still hold a private key inside this plugin's own store;
+      // flag them so users re-point them at a vault key (there is deliberately
+      // no automatic migration — plugins cannot write to the vault).
+      if (h.auth_kind === "key") {
+        var lg = el("span", "legacy", "legacy inline key");
+        lg.title = "This host stores its private key in the plugin. Edit it and pick a vault key instead.";
+        tg.appendChild(lg);
+      }
+      (h.tags || []).forEach(function (t) { tg.appendChild(el("span", "tag", t)); });
+      if (tg.childNodes.length) body.appendChild(tg);
       row.appendChild(body);
       var acts = el("div", "acts");
       var edit = el("button", null, "Edit"); edit.onclick = function (ev) { ev.stopPropagation(); openEdit(h); };
@@ -464,10 +491,47 @@ export const PAGE = `<!doctype html>
   function refreshCombos() { filterCombo.refresh(); runCombo.refresh(); }
 
   // ── add / edit host modal ──────────────────────────────────────────
+
+  // The vault keys are a fixed option set from core, so the picker is a plain
+  // <select> — never free text. Metadata only; core keeps the key material.
+  function loadKeys() {
+    if (state.keysLoaded) return Promise.resolve(state.keys);
+    return getJSON(API + "/ssh-keys").then(function (d) {
+      state.keys = d.keys || []; state.keysLoaded = true; return state.keys;
+    }).catch(function (e) {
+      state.keys = []; state.keysLoaded = false;
+      $("refHint").textContent = "Could not load the SSH key vault: " + e.message;
+      return state.keys;
+    });
+  }
+  function fillKeySelect(selectedId) {
+    var sel = $("f_key_id"); clear(sel);
+    if (!state.keys.length) {
+      var none = el("option", null, "No keys in the vault"); none.value = "";
+      sel.appendChild(none); sel.disabled = true;
+      return;
+    }
+    sel.disabled = false;
+    state.keys.forEach(function (k) {
+      var o = el("option", null, k.name + "  (" + k.key_type + ")");
+      o.value = k.id;
+      sel.appendChild(o);
+    });
+    // A host may point at a key that has since been deleted from the vault:
+    // keep it selectable so saving doesn't silently re-point the host.
+    if (selectedId && !state.keys.some(function (k) { return k.id === selectedId; })) {
+      var missing = el("option", null, "(key no longer in the vault: " + selectedId + ")");
+      missing.value = selectedId; sel.appendChild(missing);
+    }
+    sel.value = selectedId || state.keys[0].id;
+  }
+
   function setAuth(kind) {
     state.authKind = kind;
+    $("auth_ref").classList.toggle("on", kind === "key_ref");
     $("auth_pw").classList.toggle("on", kind === "password");
     $("auth_key").classList.toggle("on", kind === "key");
+    $("refField").style.display = kind === "key_ref" ? "" : "none";
     $("pwField").style.display = kind === "password" ? "" : "none";
     $("keyField").style.display = kind === "key" ? "" : "none";
     $("passField").style.display = kind === "key" ? "" : "none";
@@ -475,18 +539,25 @@ export const PAGE = `<!doctype html>
   function openAdd() {
     state.editing = null; $("modalTitle").textContent = "Add host";
     ["f_label", "f_tags", "f_hostname", "f_username", "f_password", "f_key", "f_passphrase", "f_known"].forEach(function (i) { $(i).value = ""; });
-    $("f_port").value = "22"; $("formErr").textContent = ""; setAuth("password");
-    $("f_password").placeholder = "••••••••";
+    $("f_port").value = "22"; $("formErr").textContent = ""; setAuth("key_ref");
+    $("f_password").placeholder = "••••••••"; $("f_key").placeholder = "-----BEGIN OPENSSH PRIVATE KEY-----";
     $("backdrop").classList.add("open"); $("f_hostname").focus();
+    loadKeys().then(function (keys) {
+      fillKeySelect(null);
+      // Nothing to pick yet — don't strand the user on an empty dropdown.
+      if (!keys.length && !state.editing && state.authKind === "key_ref") setAuth("password");
+    });
   }
   function openEdit(h) {
     state.editing = h.id; $("modalTitle").textContent = "Edit host";
     $("f_label").value = h.label; $("f_tags").value = (h.tags || []).join(", ");
     $("f_hostname").value = h.hostname; $("f_port").value = h.port; $("f_username").value = h.username;
     $("f_password").value = ""; $("f_key").value = ""; $("f_passphrase").value = ""; $("f_known").value = h.known_host || "";
-    $("formErr").textContent = ""; setAuth(h.auth_kind === "key" ? "key" : "password");
+    $("formErr").textContent = "";
+    setAuth(h.auth_kind === "key" ? "key" : h.auth_kind === "key_ref" ? "key_ref" : "password");
     $("f_password").placeholder = "(unchanged)"; $("f_key").placeholder = "(unchanged)";
     $("backdrop").classList.add("open");
+    loadKeys().then(function () { fillKeySelect(h.key_id || null); });
   }
   function closeModal() { $("backdrop").classList.remove("open"); }
   function saveHost() {
@@ -495,8 +566,18 @@ export const PAGE = `<!doctype html>
       username: $("f_username").value, known_host: $("f_known").value,
       tags: $("f_tags").value.split(",").map(function (s) { return s.trim(); }).filter(Boolean)
     };
-    if (state.authKind === "password") { if ($("f_password").value) body.password = $("f_password").value; }
+    if (state.authKind === "key_ref") { if ($("f_key_id").value) body.key_id = $("f_key_id").value; }
+    else if (state.authKind === "password") { if ($("f_password").value) body.password = $("f_password").value; }
     else { if ($("f_key").value) body.private_key = $("f_key").value; if ($("f_passphrase").value) body.passphrase = $("f_passphrase").value; }
+    // Omitting a credential means "keep the current one", so switching auth
+    // kind without entering one would silently leave the old kind in place.
+    var cur = state.editing ? state.byId[state.editing] : null;
+    if (cur && cur.auth_kind !== state.authKind && !body.key_id && !body.password && !body.private_key) {
+      $("formErr").textContent = state.authKind === "key_ref"
+        ? "Pick a vault key to switch this host over to it."
+        : "Enter the new credential to switch the auth kind.";
+      return;
+    }
     if (state.editing) body.id = state.editing;
     var btn = $("saveBtn"); btn.disabled = true;
     postJSON(API + "/hosts", body).then(function () { closeModal(); toast("Saved"); loadHosts(); })
@@ -520,7 +601,8 @@ export const PAGE = `<!doctype html>
   $("auth_key").onclick = function () { setAuth("key"); };
   $("hostSearch").addEventListener("input", renderHosts);
   $("runBtn").onclick = runCommand;
-  $("cmdInput").addEventListener("keydown", function (e) { if (e.key === "Enter") runCommand(); });
+  $("auth_ref").onclick = function () { setAuth("key_ref"); };
+  $("auth_pw").onclick = function () { setAuth("password"); };
   $("liveBtn").onclick = function () {
     state.live = !state.live;
     $("liveBtn").textContent = state.live ? "⏸ Pause" : "▶ Live";

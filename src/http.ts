@@ -5,7 +5,8 @@
 
 import { htmlResponse, jsonResponse, errMsg } from "./verdict";
 import { PAGE } from "./page";
-import { listHosts, redact, saveHostFromInput, resolveHost, deleteHost } from "./hosts";
+import { listHosts, redact, keyNameMap, saveHostFromInput, resolveHost, deleteHost } from "./hosts";
+import { sshKeyList } from "./host";
 import { listActivity } from "./activity";
 import { runSync, probeSync } from "./tools";
 
@@ -44,7 +45,14 @@ export function serveAuthed(payload: any): string {
 
   try {
     if (method === "GET" && path === `${API}/hosts`) {
-      return jsonResponse(200, { hosts: listHosts().map(redact) });
+      const hosts = listHosts();
+      const names = keyNameMap(hosts);
+      return jsonResponse(200, { hosts: hosts.map((h) => redact(h, names)) });
+    }
+    // The vault-key picker in the add/edit form. Metadata only — core never
+    // hands the plugin key material.
+    if (method === "GET" && path === `${API}/ssh-keys`) {
+      return jsonResponse(200, { keys: sshKeyList() });
     }
     if (method === "POST" && path === `${API}/hosts`) {
       return jsonResponse(200, { host: saveHostFromInput(parseBody(body)) });

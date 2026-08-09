@@ -10,6 +10,7 @@ import { getSetting, sshExec, sshProbe } from "./host";
 import {
   HostRecord,
   redact,
+  keyNameMap,
   toConn,
   listHosts,
   getHost,
@@ -108,7 +109,8 @@ export function sshHostList(args: any): any {
   if (tag) {
     hosts = hosts.filter((h) => (h.tags || []).some((x) => x.toLowerCase() === tag));
   }
-  return { count: hosts.length, hosts: hosts.map(redact) };
+  const names = keyNameMap(hosts);
+  return { count: hosts.length, hosts: hosts.map((h) => redact(h, names)) };
 }
 
 // ── ssh_probe ───────────────────────────────────────────────────────

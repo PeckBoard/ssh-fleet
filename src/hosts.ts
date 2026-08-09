@@ -3,17 +3,24 @@
 // input, redact secrets for the wire, and build a connection for the ssh host
 // functions.
 //
-// SECURITY: passwords / private keys / passphrases live only in these records
-// (the plugin's private data_store, never surfaced in the Settings UI) and are
-// fed straight to the ssh host functions. They are NEVER returned over the wire
-// or to an MCP tool caller — every outward view goes through `redact`.
+// SECURITY: inline passwords / private keys / passphrases live only in these
+// records (the plugin's private data_store, never surfaced in the Settings UI)
+// and are fed straight to the ssh host functions. They are NEVER returned over
+// the wire or to an MCP tool caller — every outward view goes through `redact`.
+//
+// The preferred credential is a `key_ref` host: it stores only a `key_id`
+// pointing at core's SSH key vault, so the plugin holds no key material at all
+// and core resolves the key at connect time. Hosts still carrying an inline
+// `private_key` are legacy — the dashboard flags them so users can re-point
+// them at a vault key by hand. The plugin deliberately cannot write to the
+// vault, so there is no automatic migration.
 
-import { storeList, storeGet, storePut, storeDelete, SshConn, SshAuth } from "./host";
+import { storeList, storeGet, storePut, storeDelete, sshKeyList, SshConn, SshAuth } from "./host";
 import { nextSeq } from "./counter";
 
 const COLLECTION = "hosts";
 
-export type AuthKind = "password" | "key";
+export type AuthKind = "password" | "key" | "key_ref";
 
 export interface HostRecord {
   id: string;
@@ -24,6 +31,7 @@ export interface HostRecord {
   auth_kind: AuthKind;
   password?: string;
   private_key?: string;
+  key_id?: string; // id of a key in core's vault (auth_kind === "key_ref")
   passphrase?: string;
   known_host?: string; // pinned SHA256:… server-key fingerprint (TOFU)
   tags?: string[];
@@ -44,6 +52,8 @@ export interface PublicHost {
   username: string;
   auth_kind: AuthKind;
   has_secret: boolean;
+  key_id: string | null;
+  key_name: string | null;
   known_host: string | null;
   fingerprint: string | null;
   tags: string[];
@@ -66,8 +76,18 @@ export function nowIso(): string | undefined {
   }
 }
 
+/// Whether a record actually carries the credential its `auth_kind` implies.
+function hasSecret(rec: HostRecord): boolean {
+  if (rec.auth_kind === "password") return !!rec.password;
+  if (rec.auth_kind === "key_ref") return !!rec.key_id;
+  return !!rec.private_key;
+}
+
 /// Strip all secrets, exposing only what the dashboard / an agent may see.
-export function redact(rec: HostRecord): PublicHost {
+/// `keyNames` (from `keyNameMap`) optionally resolves a `key_ref` host's
+/// vault-key id to its display name; the id alone is not a secret, and the
+/// name never is.
+export function redact(rec: HostRecord, keyNames?: Record<string, string>): PublicHost {
   return {
     id: rec.id,
     label: rec.label,
@@ -75,7 +95,9 @@ export function redact(rec: HostRecord): PublicHost {
     port: rec.port,
     username: rec.username,
     auth_kind: rec.auth_kind,
-    has_secret: rec.auth_kind === "password" ? !!rec.password : !!rec.private_key,
+    has_secret: hasSecret(rec),
+    key_id: rec.key_id ?? null,
+    key_name: (rec.key_id && keyNames ? keyNames[rec.key_id] : undefined) ?? null,
     known_host: rec.known_host ?? null,
     fingerprint: rec.last_fingerprint ?? rec.known_host ?? null,
     tags: rec.tags ?? [],
@@ -85,12 +107,32 @@ export function redact(rec: HostRecord): PublicHost {
   };
 }
 
-/// Build a connection (with secrets) for the ssh host functions.
+/// Vault-key id → name, for labelling `key_ref` hosts. Costs one host call, so
+/// it is skipped entirely when no host references the vault, and never throws:
+/// a missing `ssh_keys` grant just means hosts show their id instead.
+export function keyNameMap(hosts: HostRecord[]): Record<string, string> {
+  const map: Record<string, string> = {};
+  if (!hosts.some((h) => h.auth_kind === "key_ref" && !!h.key_id)) return map;
+  try {
+    for (const k of sshKeyList()) {
+      if (k && typeof k.id === "string") map[k.id] = k.name;
+    }
+  } catch (_e) {
+    // advisory only — fall back to showing the raw id
+  }
+  return map;
+}
+
+/// Build a connection (with secrets) for the ssh host functions. A `key_ref`
+/// host emits only its `key_id`: core resolves the vault key, so no key
+/// material ever passes through the plugin.
 export function toConn(rec: HostRecord, connectTimeoutSecs?: number): SshConn {
   const auth: SshAuth =
     rec.auth_kind === "password"
       ? { password: rec.password ?? "" }
-      : { private_key: rec.private_key ?? "", passphrase: rec.passphrase };
+      : rec.auth_kind === "key_ref"
+        ? { key_id: rec.key_id ?? "" }
+        : { private_key: rec.private_key ?? "", passphrase: rec.passphrase };
   const conn: SshConn = { host: rec.hostname, port: rec.port, username: rec.username, auth };
   if (rec.known_host) conn.known_host = rec.known_host;
   if (typeof connectTimeoutSecs === "number") conn.connect_timeout_secs = connectTimeoutSecs;
@@ -124,15 +166,19 @@ export function buildRecord(
 
   const label = trimStr(input.label) ?? existing?.label ?? hostname;
 
-  // Credentials: a provided secret wins and sets the auth kind; otherwise keep
-  // whatever the existing record had. A brand-new host must supply one.
+  // Credentials: a provided credential wins and sets the auth kind; otherwise
+  // keep whatever the existing record had. A brand-new host must supply
+  // exactly one of the three forms. A `key_id` stores no key material at all
+  // — it points at core's vault, which resolves it at connect time.
   const newPassword = typeof input.password === "string" && input.password !== "" ? input.password : undefined;
   const newKey = typeof input.private_key === "string" && input.private_key !== "" ? input.private_key : undefined;
+  const newKeyId = trimStr(input.key_id);
 
   let auth_kind: AuthKind;
   let password: string | undefined;
   let private_key: string | undefined;
   let passphrase: string | undefined;
+  let key_id: string | undefined;
   if (newPassword) {
     auth_kind = "password";
     password = newPassword;
@@ -140,15 +186,19 @@ export function buildRecord(
     auth_kind = "key";
     private_key = newKey;
     passphrase = typeof input.passphrase === "string" && input.passphrase !== "" ? input.passphrase : undefined;
+  } else if (newKeyId) {
+    auth_kind = "key_ref";
+    key_id = newKeyId;
   } else if (existing) {
     auth_kind = existing.auth_kind;
     password = existing.password;
     private_key = existing.private_key;
+    key_id = existing.key_id;
     // allow updating just the passphrase of an existing key
     passphrase =
       typeof input.passphrase === "string" && input.passphrase !== "" ? input.passphrase : existing.passphrase;
   } else {
-    throw new Error("provide either a password or a private_key");
+    throw new Error("provide either a password, a private_key, or a key_id");
   }
 
   let tags: string[] | undefined = existing?.tags;
@@ -170,6 +220,7 @@ export function buildRecord(
     password,
     private_key,
     passphrase,
+    key_id,
     known_host,
     tags,
     created_at: existing?.created_at ?? nowIso(),
@@ -215,7 +266,7 @@ export function saveHostFromInput(input: any): PublicHost {
   const existing = id ? getHost(id) : null;
   const rec = buildRecord(input, existing, mintId);
   putHost(rec);
-  return redact(rec);
+  return redact(rec, keyNameMap([rec]));
 }
 
 /// Resolve a host by id, then label, then hostname (case-insensitive).
