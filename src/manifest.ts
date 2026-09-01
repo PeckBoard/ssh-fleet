@@ -9,7 +9,11 @@ const DESCRIPTION =
   "read/write/edit remote files — all through native SSH in Peckboard core (keys " +
   "stay in memory). Ships a live activity dashboard showing every command per-host " +
   "and across all hosts.";
-const VERSION = "0.3.0";
+// Single source of truth for the version: package.json (bundled in by
+// esbuild/vitest via resolveJsonModule). Never hardcode a version here — a
+// manifest that self-reports an old version makes the registry's
+// "upgrade available" chip permanent (project-planner 0.3.0 shipped that way).
+import { version as VERSION } from "../package.json";
 const REPOSITORY = "https://github.com/PeckBoard/ssh-fleet";
 
 // Inline SVG (lucide "server") for the sidebar entry; rendered sandboxed.
