@@ -99,7 +99,10 @@ describe("ssh_run defer protocol", () => {
   });
 
   it("phase 1 emits an exec defer carrying the connection + resume", () => {
-    const v = invoke({ tool: "ssh_run", arguments: { host: "web1", command: "uptime", timeout_secs: 5 } });
+    const v = invoke({
+      tool: "ssh_run",
+      arguments: { host: "web1", command: "uptime", timeout_secs: 5, reason: "check load" },
+    });
     expect(v.verdict).toBe("defer");
     expect(v.op).toMatchObject({
       kind: "exec",
@@ -168,7 +171,7 @@ describe("ssh_run_many defer protocol", () => {
   });
 
   it("phase 1 emits a batch op over all targets", () => {
-    const v = invoke({ tool: "ssh_run_many", arguments: { all: true, command: "hostname" } });
+    const v = invoke({ tool: "ssh_run_many", arguments: { all: true, command: "hostname", reason: "inventory" } });
     expect(v.verdict).toBe("defer");
     expect(v.op.kind).toBe("batch");
     expect(v.op.ops).toHaveLength(2);
@@ -221,7 +224,10 @@ describe("ssh_edit_file two-stage defer", () => {
   });
 
   it("phase 1 defers a read", () => {
-    const v = invoke({ tool: "ssh_edit_file", arguments: { host: "web1", path: "/etc/motd", find: "old", replace: "new" } });
+    const v = invoke({
+      tool: "ssh_edit_file",
+      arguments: { host: "web1", path: "/etc/motd", find: "old", replace: "new", reason: "refresh banner" },
+    });
     expect(v.verdict).toBe("defer");
     expect(v.op).toMatchObject({ kind: "read_file", path: "/etc/motd" });
     expect(v.resume).toMatchObject({ stage: "read", path: "/etc/motd", find: "old", replace: "new" });
@@ -239,6 +245,8 @@ describe("ssh_edit_file two-stage defer", () => {
     expect(v.op.kind).toBe("write_file");
     expect(Buffer.from(v.op.content_base64, "base64").toString("utf8")).toBe("hello new world");
     expect(v.resume).toMatchObject({ stage: "write", replacements: 1 });
+    // The dashboard's Diff view: old line removed, new line added.
+    expect(v.resume.diff).toBe("- hello old world\n+ hello new world");
   });
 
   it("write finalize returns the result", () => {
@@ -253,28 +261,96 @@ describe("ssh_edit_file two-stage defer", () => {
   });
 });
 
-// ── Dashboard HTTP routes run synchronously (NOT via defer) ─────────────────
-//
-// Regression: /run and /probe are request/response and don't go through the
-// core defer loop, so they must return a real result — not a `deferReq`
-// sentinel, which rendered "exit undefined" on the dashboard.
+// ── Required reason + session attribution ───────────────────────────────────────
 
-describe("dashboard run/probe routes", () => {
-  it("POST /run returns a real exec result, not a defer sentinel", () => {
-    installHost({ hosts: { h1: pwHost("h1", "web1", "10.0.0.1", "s3cret") } }, {}, {
-      exec: () => ({
+describe("reason is required on command/write tools", () => {
+  const calls: Array<[string, any]> = [
+    ["ssh_run", { host: "web1", command: "uptime" }],
+    ["ssh_run_many", { all: true, command: "uptime" }],
+    ["ssh_write_file", { host: "web1", path: "/tmp/x", content: "x" }],
+    ["ssh_edit_file", { host: "web1", path: "/tmp/x", content: "x" }],
+  ];
+  beforeEach(() => {
+    installHost({ hosts: { h1: pwHost("h1", "web1", "10.0.0.1", "a") } });
+  });
+
+  for (const [tool, args] of calls) {
+    it(`${tool}: missing / blank / oversized reason is rejected before any op`, () => {
+      for (const reason of [undefined, "", "   ", "x".repeat(301)]) {
+        const v = invoke({ tool, arguments: reason === undefined ? args : { ...args, reason } });
+        expect(v.verdict).toBe("allow");
+        expect(v.payload.error).toMatch(/reason/);
+      }
+      const ok = invoke({ tool, arguments: { ...args, reason: "  verify the deploy  " } });
+      expect(ok.verdict).toBe("defer");
+    });
+  }
+
+  it("read / probe accept a call without a reason", () => {
+    expect(invoke({ tool: "ssh_read_file", arguments: { host: "web1", path: "/etc/hosts" } }).verdict).toBe("defer");
+    expect(invoke({ tool: "ssh_probe", arguments: { host: "web1" } }).verdict).toBe("defer");
+  });
+});
+
+describe("activity attribution", () => {
+  it("an ssh_run entry stores the calling session and the trimmed reason", () => {
+    const store = installHost({ hosts: { h1: pwHost("h1", "web1", "10.0.0.1", "a") } });
+    const v = invoke({
+      tool: "ssh_run",
+      arguments: { host: "web1", command: "df -h", reason: "  check disk before deploy " },
+      context: { sessionId: "sess-123", sessionName: "Deploy bot", folderId: "f1" },
+      resume: { id: "h1", label: "web1", command: "df -h" },
+      op_result: {
         ok: true,
         exit_code: 0,
-        stdout: "hi",
+        stdout: "ok",
         stderr: "",
-        stdout_truncated: false,
-        stderr_truncated: false,
         timed_out: false,
-        server_fingerprint: "SHA256:x",
-        started_at: "t",
+        server_fingerprint: "x",
         finished_at: "t",
-        duration_ms: 5,
-      }),
+        duration_ms: 4,
+      },
+    });
+    expect(v.verdict).toBe("allow");
+    const [entry] = Object.values(store.activity ?? {}) as any[];
+    expect(entry).toMatchObject({
+      tool: "ssh_run",
+      summary: "df -h",
+      session_id: "sess-123",
+      session_name: "Deploy bot",
+      reason: "check disk before deploy",
+      source: "agent",
+    });
+  });
+});
+
+describe("activity paging", () => {
+  it("returns the newest page, then older pages via `before`", () => {
+    const activity: Record<string, any> = {};
+    for (let i = 1; i <= 5; i++) activity[String(i).padStart(12, "0")] = { id: i, tool: "ssh_run", ok: true };
+    installHost({ activity });
+    const get = (q: string) =>
+      JSON.parse(
+        JSON.parse(serveAuthed({ method: "GET", path: "/api/plugin-ui/ssh-fleet/activity", query: q, body: "" })).payload
+          .body,
+      );
+    const first = get("host=all&since=0&limit=2");
+    expect(first.items.map((a: any) => a.id)).toEqual([4, 5]);
+    expect(first).toMatchObject({ cursor: 5, has_more: true });
+    const older = get("host=all&before=4&limit=2");
+    expect(older.items.map((a: any) => a.id)).toEqual([2, 3]);
+    expect(older.has_more).toBe(true);
+    expect(get("host=all&before=2&limit=2")).toMatchObject({ has_more: false });
+  });
+});
+// ── Dashboard routes: no command execution ────────────────────────────────────
+
+describe("dashboard routes", () => {
+  it("there is no POST /run: the page cannot run commands", () => {
+    installHost({ hosts: { h1: pwHost("h1", "web1", "10.0.0.1", "s3cret") } }, {}, {
+      exec: () => {
+        throw new Error("must not exec");
+      },
     });
     const resp = JSON.parse(
       serveAuthed({
@@ -284,14 +360,11 @@ describe("dashboard run/probe routes", () => {
         body: JSON.stringify({ host: "web1", command: "echo hi" }),
       }),
     );
-    expect(resp.verdict).toBe("allow");
-    const result = JSON.parse(resp.payload.body);
-    expect(result.__defer__).toBeUndefined();
-    expect(result).toMatchObject({ host: "web1", host_id: "h1", exit_code: 0, stdout: "hi" });
+    expect(resp.payload.status).toBe(404);
   });
 
-  it("POST /probe returns a real probe result", () => {
-    installHost({ hosts: { h1: pwHost("h1", "web1", "10.0.0.1", "s3cret") } }, {}, {
+  it("POST /probe returns a real probe result, logged as a dashboard test", () => {
+    const store = installHost({ hosts: { h1: pwHost("h1", "web1", "10.0.0.1", "s3cret") } }, {}, {
       probe: () => ({ ok: true, server_fingerprint: "SHA256:y", latency_ms: 12, finished_at: "t" }),
     });
     const resp = JSON.parse(
@@ -304,36 +377,10 @@ describe("dashboard run/probe routes", () => {
     );
     expect(resp.verdict).toBe("allow");
     const result = JSON.parse(resp.payload.body);
+    expect(result.__defer__).toBeUndefined();
     expect(result).toMatchObject({ host: "web1", ok: true, server_fingerprint: "SHA256:y", latency_ms: 12 });
-  });
-
-  it("a dashboard run appears in the activity feed", () => {
-    installHost({ hosts: { h1: pwHost("h1", "web1", "10.0.0.1", "s3cret") } }, {}, {
-      exec: () => ({
-        ok: true,
-        exit_code: 0,
-        stdout: "Steam\nanaconda-ks.cfg",
-        stderr: "",
-        stdout_truncated: false,
-        stderr_truncated: false,
-        timed_out: false,
-        server_fingerprint: "x",
-        started_at: "t",
-        finished_at: "t",
-        duration_ms: 3,
-      }),
-    });
-    serveAuthed({
-      method: "POST",
-      path: "/api/plugin-ui/ssh-fleet/run",
-      query: "",
-      body: JSON.stringify({ host: "web1", command: "ls" }),
-    });
-    const resp = JSON.parse(
-      serveAuthed({ method: "GET", path: "/api/plugin-ui/ssh-fleet/activity", query: "host=h1&since=0", body: "" }),
-    );
-    const feed = JSON.parse(resp.payload.body);
-    expect(feed.items).toHaveLength(1);
-    expect(feed.items[0]).toMatchObject({ tool: "ssh_run", host_id: "h1", host_label: "web1", exit_code: 0 });
+    const [entry] = Object.values(store.activity ?? {}) as any[];
+    expect(entry).toMatchObject({ tool: "ssh_probe", source: "dashboard" });
+    expect(entry.session_id).toBeUndefined();
   });
 });

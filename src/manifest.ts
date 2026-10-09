@@ -7,9 +7,10 @@ const DESCRIPTION =
   "Peckboard's SSH key vault, or an inline password / private key) and drive them " +
   "over MCP tools — run commands on one host or across the whole fleet, " +
   "read/write/edit remote files — all through native SSH in Peckboard core (keys " +
-  "stay in memory). Ships a live activity dashboard showing every command per-host " +
-  "and across all hosts, and serves its hosts to Peckboard's interactive terminals: " +
-  "a real, tmux-persistent shell on any host, in a full-size app tab.";
+  "stay in memory). Every command records the session that ran it and the reason it " +
+  "gave; the dashboard shows that audit trail per-host and across all hosts, and " +
+  "serves its hosts to Peckboard's interactive terminals: a real, tmux-persistent " +
+  "shell on any host, in a full-size app tab.";
 // Single source of truth for the version: package.json (bundled in by
 // esbuild/vitest via resolveJsonModule). Never hardcode a version here — a
 // manifest that self-reports an old version makes the registry's
@@ -27,6 +28,20 @@ const ICON =
 const HOST_REF =
   "Host reference: its id, label, or hostname (case-insensitive). Call ssh_host_list to see them.";
 
+// Shown on the SSH Fleet page next to the call, so a human can audit why an
+// agent touched a host. Required on every mutating/command tool.
+const REASON_REQUIRED = {
+  type: "string",
+  maxLength: 300,
+  description:
+    "Required. One short sentence (≤300 chars) saying WHY you are doing this — e.g. \"check disk " +
+    "usage before deploying\". Shown to the user in the SSH Fleet audit log.",
+};
+const REASON_OPTIONAL = {
+  type: "string",
+  maxLength: 300,
+  description: "Optional short reason (≤300 chars), shown in the SSH Fleet audit log.",
+};
 export function manifestJson(): string {
   const manifest = {
     description: DESCRIPTION,
@@ -53,7 +68,6 @@ export function manifestJson(): string {
       "provide_mcp_tools", // the ssh_* MCP tools
       "ssh", // peckboard_ssh_probe / _exec / _read_file / _write_file + the terminal.* hooks
       "ssh_keys", // peckboard_ssh_key_list + auth by vault key id (never key material)
-      "ssh_keys", // peckboard_ssh_key_list + auth by vault key id (never key material)
       "data_store", // host registry + activity log
       "user_authority", // serve the authenticated dashboard data routes
       "contribute_sidebar", // the SSH Fleet sidebar page
@@ -73,7 +87,7 @@ export function manifestJson(): string {
       "POST /api/plugin-ui/ssh-fleet/host-remove",
       "GET /api/plugin-ui/ssh-fleet/activity",
       "POST /api/plugin-ui/ssh-fleet/probe",
-      "POST /api/plugin-ui/ssh-fleet/run",
+      "POST /api/plugin-ui/ssh-fleet/probe-draft",
     ],
 
     settings: [
@@ -185,7 +199,7 @@ export function manifestJson(): string {
           HOST_REF,
         input_schema: {
           type: "object",
-          properties: { host: { type: "string", description: HOST_REF } },
+          properties: { host: { type: "string", description: HOST_REF }, reason: REASON_OPTIONAL },
           required: ["host"],
           additionalProperties: false,
         },
@@ -195,15 +209,16 @@ export function manifestJson(): string {
         description:
           "Run a shell command on one host and return its stdout, stderr, and exit code. The command " +
           "is interpreted by the remote shell, so pipes/redirection work. Output is capped at 1 MiB per " +
-          "stream. " + HOST_REF,
+          "stream. Always pass `reason`: a short why, shown to the user in the audit log. " + HOST_REF,
         input_schema: {
           type: "object",
           properties: {
             host: { type: "string", description: HOST_REF },
             command: { type: "string", description: "The command line to run on the remote shell." },
+            reason: REASON_REQUIRED,
             timeout_secs: { type: "integer", description: "Command timeout in seconds (default 30, max 600)." },
           },
-          required: ["host", "command"],
+          required: ["host", "command", "reason"],
           additionalProperties: false,
         },
       },
@@ -212,17 +227,18 @@ export function manifestJson(): string {
         description:
           "Run the same command across multiple hosts and return a per-host result array. Target the " +
           "hosts by an explicit list, by tag, or set all:true for the whole fleet. Failures on one host " +
-          "don't stop the others.",
+          "don't stop the others. Always pass `reason`: a short why, shown to the user in the audit log.",
         input_schema: {
           type: "object",
           properties: {
             command: { type: "string", description: "The command line to run on each host." },
+            reason: REASON_REQUIRED,
             hosts: { type: "array", items: { type: "string" }, description: "Explicit host references (id/label/hostname)." },
             tag: { type: "string", description: "Target every host carrying this tag." },
             all: { type: "boolean", description: "Target every registered host." },
             timeout_secs: { type: "integer", description: "Per-host command timeout in seconds." },
           },
-          required: ["command"],
+          required: ["command", "reason"],
           additionalProperties: false,
         },
       },
@@ -236,6 +252,7 @@ export function manifestJson(): string {
           properties: {
             host: { type: "string", description: HOST_REF },
             path: { type: "string", description: "Absolute or remote-home-relative path to read." },
+            reason: REASON_OPTIONAL,
           },
           required: ["host", "path"],
           additionalProperties: false,
@@ -245,16 +262,18 @@ export function manifestJson(): string {
         name: "ssh_write_file",
         description:
           "Write (create/overwrite) a remote file over SFTP. Provide `content` for text or " +
-          "`content_base64` for binary. " + HOST_REF,
+          "`content_base64` for binary. Always pass `reason`: a short why, shown to the user in the " +
+          "audit log. " + HOST_REF,
         input_schema: {
           type: "object",
           properties: {
             host: { type: "string", description: HOST_REF },
             path: { type: "string", description: "Remote path to write." },
+            reason: REASON_REQUIRED,
             content: { type: "string", description: "UTF-8 text content." },
             content_base64: { type: "string", description: "Base64 content, for binary files." },
           },
-          required: ["host", "path"],
+          required: ["host", "path", "reason"],
           additionalProperties: false,
         },
       },
@@ -263,18 +282,20 @@ export function manifestJson(): string {
         description:
           "Edit a remote file: either replace its whole content (`content`), or do a literal find/replace " +
           "(`find` + optional `replace`, replacing every occurrence; set expect_count to assert how many). " +
-          "Reads the file, applies the change, writes it back. " + HOST_REF,
+          "Reads the file, applies the change, writes it back. Always pass `reason`: a short why, shown " +
+          "to the user in the audit log. " + HOST_REF,
         input_schema: {
           type: "object",
           properties: {
             host: { type: "string", description: HOST_REF },
             path: { type: "string", description: "Remote path to edit." },
+            reason: REASON_REQUIRED,
             content: { type: "string", description: "Full replacement content (also creates a new file)." },
             find: { type: "string", description: "Literal substring to replace." },
             replace: { type: "string", description: "Replacement for `find` (default: empty = delete it)." },
             expect_count: { type: "integer", description: "If set, fail unless exactly this many occurrences are replaced." },
           },
-          required: ["host", "path"],
+          required: ["host", "path", "reason"],
           additionalProperties: false,
         },
       },

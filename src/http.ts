@@ -1,15 +1,18 @@
 // HTTP surfaces: the served dashboard page (`http.request.before`) and the
 // authenticated app-UI endpoints (`http.request.authed`) the page polls for
-// hosts + live activity and uses to run commands. Credentials are never
-// returned here — the hosts list goes through `redact`. Interactive shells
-// are a core feature; the page only deep-links into them (see page.ts).
+// hosts + live activity. The page deliberately cannot run commands — agents
+// do that through the MCP tools, each call attributed to its session with a
+// stated reason; the dashboard only manages hosts and runs connectivity
+// tests (`/probe`, `/probe-draft`: connect + auth, no command). Credentials are never returned
+// here — the hosts list goes through `redact`. Interactive shells are a core
+// feature; the page only deep-links into them (see page.ts).
 
 import { htmlResponse, jsonResponse, errMsg } from "./verdict";
 import { PAGE } from "./page";
 import { listHosts, redact, keyNameMap, saveHostFromInput, resolveHost, deleteHost } from "./hosts";
 import { sshKeyList } from "./host";
-import { listActivity } from "./activity";
-import { runSync, probeSync } from "./tools";
+import { listActivity, DASHBOARD } from "./activity";
+import { probeSync, probeDraft } from "./tools";
 
 const PAGE_PATH = "/plugin-api/v1/ssh-fleet";
 const API = "/api/plugin-ui/ssh-fleet";
@@ -66,16 +69,21 @@ export function serveAuthed(payload: any): string {
     }
     if (method === "GET" && path === `${API}/activity`) {
       const host = queryParam(query, "host");
-      const sinceRaw = Number(queryParam(query, "since") || "0");
-      return jsonResponse(200, listActivity({ host, since: isFinite(sinceRaw) ? sinceRaw : 0 }));
+      const num = (name: string) => {
+        const n = Number(queryParam(query, name) || "0");
+        return isFinite(n) ? n : 0;
+      };
+      return jsonResponse(
+        200,
+        listActivity({ host, since: num("since"), before: num("before"), limit: num("limit") || undefined }),
+      );
     }
     if (method === "POST" && path === `${API}/probe`) {
       const b = parseBody(body);
-      return jsonResponse(200, probeSync({ host: b?.host }));
+      return jsonResponse(200, probeSync({ host: b?.host }, DASHBOARD));
     }
-    if (method === "POST" && path === `${API}/run`) {
-      const b = parseBody(body);
-      return jsonResponse(200, runSync({ host: b?.host, command: b?.command, timeout_secs: b?.timeout_secs }));
+    if (method === "POST" && path === `${API}/probe-draft`) {
+      return jsonResponse(200, probeDraft(parseBody(body)));
     }
   } catch (e) {
     return jsonResponse(400, { error: errMsg(e) });

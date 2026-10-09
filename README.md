@@ -8,10 +8,12 @@ and drives them over MCP tools, with a **live activity dashboard**.
   password, or an inline private key (with optional passphrase) — plus a
   friendly label and tags for grouping.
 - **MCP tools** — agents can register hosts, run commands on one host or across
-  the whole fleet, and read / write / edit remote files.
-- **Live dashboard** — a sidebar page ("SSH Fleet") that shows every command as
-  it happens, filterable to one host or all hosts, with a searchable host picker
-  built for large fleets.
+  the whole fleet, and read / write / edit remote files. Every command or write
+  must carry a short `reason`, and is recorded with the session that made it.
+- **Audit dashboard** — a sidebar page ("SSH Fleet") listing the hosts and a
+  live feed of every agent SSH call: who (a link to the session), why (the
+  reason), what (command / path), and how it went. The page manages hosts but
+  deliberately **cannot run commands**.
 - **Interactive terminals** — every host is available to Peckboard's built-in
   terminals (Terminals page, `t` shortcut, or the host's **Terminal** button
   here): a real shell in a full-size app tab, run inside tmux on the host so it
@@ -55,7 +57,7 @@ them by editing the host and choosing a vault key.
 > permission set, so you must re-approve the plugin in Settings → Plugins after
 > updating.
 
-## MCP tools
+## MCP Tools
 
 | Tool | What it does |
 | --- | --- |
@@ -63,14 +65,18 @@ them by editing the host and choosing a vault key.
 | `ssh_host_update` | Update a host by `id`; omit a credential to keep the current one, or pass `key_id` / `password` / `private_key` to switch auth kind. |
 | `ssh_host_remove` | Remove a host (by id, label, or hostname). |
 | `ssh_host_list` | List hosts (credentials redacted) with last-seen status; vault-key hosts report `auth_kind: "key_ref"` with `key_id` + `key_name`. |
-| `ssh_probe` | Connect + authenticate without running anything; returns the server-key fingerprint (for pinning) and latency. |
-| `ssh_run` | Run a command on one host → `{exit_code, stdout, stderr, …}` (1 MiB/stream). |
-| `ssh_run_many` | Run a command across `hosts` / a `tag` / `all` hosts → per-host results. |
-| `ssh_read_file` | Read a remote file over SFTP (returns text + base64). |
-| `ssh_write_file` | Write/overwrite a remote file (`content` text or `content_base64` binary). |
-| `ssh_edit_file` | Edit a remote file: full-content replace, or literal `find`/`replace`. |
+| `ssh_probe` | Connect + authenticate without running anything; returns the server-key fingerprint (for pinning) and latency. Optional `reason`. |
+| `ssh_run` | Run a command on one host → `{exit_code, stdout, stderr, …}` (1 MiB/stream). **Requires `reason`.** |
+| `ssh_run_many` | Run a command across `hosts` / a `tag` / `all` hosts → per-host results. **Requires `reason`.** |
+| `ssh_read_file` | Read a remote file over SFTP (returns text + base64). Optional `reason`. |
+| `ssh_write_file` | Write/overwrite a remote file (`content` text or `content_base64` binary). **Requires `reason`.** |
+| `ssh_edit_file` | Edit a remote file: full-content replace, or literal `find`/`replace`. **Requires `reason`.** |
 
-Every tool call is appended to the activity log the dashboard shows.
+`reason` is one short sentence (trimmed, 1–300 chars) saying why the agent is
+doing it; a missing, blank, or over-long reason is rejected before anything
+touches a host. Every tool call is appended to the activity log with the
+calling session's id and name — taken from core's verified invoke context
+(`context.sessionId` / `context.sessionName`), never from tool arguments.
 
 Hosts are referenced by their **id, label, or hostname** (case-insensitive) —
 call `ssh_host_list` to see them.
@@ -78,19 +84,30 @@ call `ssh_host_list` to see them.
 ## Dashboard
 
 The manifest contributes a global **sidebar** entry, `SSH Fleet`, that opens the
-dashboard (served at `/plugin-api/v1/ssh-fleet`, framed in a sandboxed iframe):
-- a **host panel** with per-host status dots (ok / error / unknown), the
-  credential in use (vault key name, password, or a *legacy inline key* badge),
-  and tags, searchable by name/host/tag, with inline add / edit / remove;
-  large fleet), plus an all-hosts view;
-- a **host panel** with per-host status dots (ok / error / unknown), auth kind,
-  and tags, searchable by name/host/tag, with inline add / edit / remove;
-- a **live activity feed** (tool, command, exit code / bytes, duration, stderr on
-  failure) that updates by polling `/api/plugin-ui/ssh-fleet/activity` every ~2s;
-- an inline **run** box to execute a command against the selected host.
+dashboard (served at `/plugin-api/v1/ssh-fleet`, framed in a sandboxed iframe).
+It follows the app's light/dark theme and palette, and below ~760px wide the
+two panels become tabs.
+
+- **Hosts** — compact rows built for large fleets: status dot, label, last seen,
+  `user@host:port`, auth kind (vault key name, password, or a *legacy inline
+  key* badge), tags, and quick actions: **Terminal**, **Test** (connect +
+  authenticate only — runs nothing), **Edit**, **Remove** (with confirm).
+  Searchable, filterable by tag chips, sortable by name / last seen / status.
+  Clicking a host filters the activity feed to it.
+- **Activity** — every call, newest first: status (exit code / ok / failed),
+  tool, host, the **session that made it** (a link that opens the session in
+  the app), time, duration, the **reason**, the command or path, and the output
+  (expandable). Filter by host, session, failures only, or free text. Polls
+  `/api/plugin-ui/ssh-fleet/activity` every ~2s (pausable). Entries written
+  before 0.6.0 show `—` for the session.
 
 It reads its data from the authenticated `/api/plugin-ui/ssh-fleet/*` routes via
 the standard parent-proxied fetch bridge (the iframe has no same-origin access).
+There is no command-execution route: running commands is the agents' job, under
+an attributed, stated reason.
+
+## Security
+
 - A **vault key** host stores only a `key_id`. The private key never enters the
   plugin — core decrypts it from the vault for the connection. This is the
   recommended setup.
@@ -106,9 +123,6 @@ the standard parent-proxied fetch bridge (the iframe has no same-origin access).
 - Inline credentials are stored **unencrypted at rest** in the plugin's
   `plugin_data` rows (the same posture as other plugins' secrets). Vault keys
   are not — core encrypts them under its vault key. Protect the Peckboard data
-  directory accordingly.
-- Credentials are stored **unencrypted at rest** in the plugin's `plugin_data`
-  rows (the same posture as other plugins' secrets). Protect the Peckboard data
   directory accordingly.
 
 ## Settings

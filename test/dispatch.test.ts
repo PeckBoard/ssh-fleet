@@ -28,8 +28,8 @@ describe("activity preview", () => {
     expect(preview(undefined)).toBeUndefined();
   });
   it("truncates long output with a marker", () => {
-    const p = preview("x".repeat(1000))!;
-    expect(p.length).toBeLessThan(500);
+    const p = preview("x".repeat(5000))!;
+    expect(p.length).toBeLessThan(2100);
     expect(p).toContain("truncated");
   });
 });

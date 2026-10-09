@@ -9,6 +9,7 @@
 import { skip, allow, cancel, defer, isDeferReq, errMsg } from "./verdict";
 import { serveHttp, serveAuthed } from "./http";
 import { terminalHosts, resolveTerminalHost } from "./terminals";
+import { Actor, actorFrom, checkReason } from "./activity";
 import {
   sshHostAdd,
   sshHostUpdate,
@@ -26,11 +27,12 @@ import {
   sshWriteFileFinalize,
   sshEditFileTool,
   sshEditFileFinalize,
+  REASON_REQUIRED_TOOLS,
 } from "./tools";
 
 /// Phase-1 tool handlers. A slow tool returns a `deferReq` sentinel (core runs
 /// the op, then re-enters via FINALIZERS); a synchronous tool returns its result.
-const TOOLS: Record<string, (args: any) => any> = {
+const TOOLS: Record<string, (args: any, actor: Actor) => any> = {
   ssh_host_add: sshHostAdd,
   ssh_host_update: sshHostUpdate,
   ssh_host_remove: sshHostRemove,
@@ -46,7 +48,7 @@ const TOOLS: Record<string, (args: any) => any> = {
 /// Finalize handlers, keyed by tool: core calls these on the defer re-entry with
 /// `(args, resume, op_result)`. A finalizer may itself return a `deferReq`
 /// (e.g. ssh_edit_file: read, then write).
-const FINALIZERS: Record<string, (args: any, resume: any, opResult: any) => any> = {
+const FINALIZERS: Record<string, (args: any, resume: any, opResult: any, actor: Actor) => any> = {
   ssh_probe: sshProbeFinalize,
   ssh_run: sshRunFinalize,
   ssh_run_many: sshRunManyFinalize,
@@ -91,14 +93,16 @@ function handleInvoke(payload: any): string {
   const args = payload.arguments ?? {};
 
   // Defer re-entry: core ran the op and handed back its result. Route to the
-  // finalizer, which returns a result or defers again (ssh_edit_file).
+  // finalizer, which returns a result or defers again (ssh_edit_file). The
+  // reason was validated in phase 1; core re-sends the same arguments.
   if ("op_result" in payload) {
     const fin = FINALIZERS[tool];
     if (!fin) {
       return cancel(`ssh-fleet has no finalizer for tool '${tool}'`);
     }
     try {
-      return verdictFor(fin(args, payload.resume, payload.op_result));
+      const actor = actorFrom(payload, checkReason(args.reason, false));
+      return verdictFor(fin(args, payload.resume, payload.op_result, actor));
     } catch (e) {
       return allow({ error: errMsg(e) });
     }
@@ -110,7 +114,9 @@ function handleInvoke(payload: any): string {
     return cancel(`ssh-fleet does not provide tool '${tool}'`);
   }
   try {
-    return verdictFor(fn(args));
+    // Validate the reason before touching any host.
+    const actor = actorFrom(payload, checkReason(args.reason, REASON_REQUIRED_TOOLS[tool] === true));
+    return verdictFor(fn(args, actor));
   } catch (e) {
     // A handler error is a normal tool result (the agent sees the message),
     // not a plugin cancel.
