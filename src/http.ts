@@ -1,9 +1,8 @@
 // HTTP surfaces: the served dashboard page (`http.request.before`) and the
 // authenticated app-UI endpoints (`http.request.authed`) the page polls for
-// hosts + live activity, uses to run commands, and uses to open / list /
-// close interactive terminals. Credentials are never returned here — the
-// hosts list goes through `redact`, and a terminal's view carries only its
-// identity (user@host:port) and state.
+// hosts + live activity and uses to run commands. Credentials are never
+// returned here — the hosts list goes through `redact`. Interactive shells
+// are a core feature; the page only deep-links into them (see page.ts).
 
 import { htmlResponse, jsonResponse, errMsg } from "./verdict";
 import { PAGE } from "./page";
@@ -11,7 +10,6 @@ import { listHosts, redact, keyNameMap, saveHostFromInput, resolveHost, deleteHo
 import { sshKeyList } from "./host";
 import { listActivity } from "./activity";
 import { runSync, probeSync } from "./tools";
-import { openTerminal, listTerminals, closeTerminal } from "./terminals";
 
 const PAGE_PATH = "/plugin-api/v1/ssh-fleet";
 const API = "/api/plugin-ui/ssh-fleet";
@@ -78,19 +76,6 @@ export function serveAuthed(payload: any): string {
     if (method === "POST" && path === `${API}/run`) {
       const b = parseBody(body);
       return jsonResponse(200, runSync({ host: b?.host, command: b?.command, timeout_secs: b?.timeout_secs }));
-    }
-    // Interactive terminals: the shells live in core; the page attaches to
-    // one over /ws/terminal with a plugin-scoped ticket (see page.ts).
-    if (method === "GET" && path === `${API}/terminals`) {
-      return jsonResponse(200, listTerminals());
-    }
-    if (method === "POST" && path === `${API}/terminals`) {
-      const b = parseBody(body);
-      return jsonResponse(200, openTerminal({ host: b?.host, cols: b?.cols, rows: b?.rows }));
-    }
-    if (method === "POST" && path === `${API}/terminal-close`) {
-      const b = parseBody(body);
-      return jsonResponse(200, closeTerminal({ id: b?.id }));
     }
   } catch (e) {
     return jsonResponse(400, { error: errMsg(e) });

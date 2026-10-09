@@ -1,79 +1,47 @@
-// Interactive terminals for the dashboard: open a PTY shell on a registered
-// host, list the ones core still holds open, close one. The shells live in
-// CORE (see peckboard/src/plugin/ssh_term.rs) — this module only resolves the
-// host record into connection fields for the `peckboard_ssh_term_*` host
-// functions and records the activity. Like the dashboard's /run route, these
-// run synchronously inside the authed request (an explicit user action).
+// Interactive terminals are a Peckboard CORE feature (full-size tabs in the
+// main app, tmux-backed persistence — see peckboard/src/terminal/). This
+// plugin only answers core's two terminal hooks for the hosts it stores:
+//
+// - `terminal.hosts.list`: the host picker's entries — identity only;
+// - `terminal.host.resolve`: one host's connection fields (WITH its secret),
+//   asked by core at every connect and automatic reconnect. They go straight
+//   back to core, never to a browser, and core never persists them.
 
-import { getSetting, sshTermOpen, sshTermList, sshTermClose, TerminalInfo } from "./host";
-import { resolveHost, toConn, updateHostStatus, nowIso } from "./hosts";
+import { getSetting } from "./host";
+import { getHost, listHosts, toConn, nowIso } from "./hosts";
 import { logActivity } from "./activity";
-
-function numOpt(v: unknown): number | undefined {
-  return typeof v === "number" && isFinite(v) ? v : undefined;
-}
 
 function defTimeout(): number | undefined {
   const v = getSetting("connect_timeout_secs");
   return typeof v === "number" ? v : undefined;
 }
 
-/// `POST /terminals` — open a shell on `host` (id / label / hostname) sized
-/// `cols`×`rows`. Returns core's view of the new terminal.
-export function openTerminal(args: any): { terminal: TerminalInfo } {
-  const rec = resolveHost(args?.host);
-  const conn = toConn(rec, defTimeout());
-  try {
-    const terminal = sshTermOpen(conn, {
-      label: rec.label,
-      host_id: rec.id,
-      cols: numOpt(args?.cols),
-      rows: numOpt(args?.rows),
-    });
-    updateHostStatus(rec.id, { ok: true });
-    logActivity({
-      ts: nowIso() ?? null,
-      host_id: rec.id,
-      host_label: rec.label,
-      tool: "ssh_terminal",
-      summary: "opened interactive terminal",
-      ok: true,
-    });
-    return { terminal };
-  } catch (e) {
-    const error = e instanceof Error ? e.message : String(e);
-    updateHostStatus(rec.id, { ok: false, error });
-    logActivity({
-      ts: nowIso() ?? null,
-      host_id: rec.id,
-      host_label: rec.label,
-      tool: "ssh_terminal",
-      summary: "open interactive terminal",
-      ok: false,
-      error,
-    });
-    throw e;
-  }
+/// `terminal.hosts.list` — every stored host, no credentials.
+export function terminalHosts(): { hosts: unknown[] } {
+  return {
+    hosts: listHosts().map((h) => ({
+      id: h.id,
+      label: h.label || h.hostname,
+      hostname: h.hostname,
+      username: h.username,
+      port: h.port,
+      tags: h.tags ?? [],
+    })),
+  };
 }
 
-/// `GET /terminals` — every terminal core still holds for this plugin,
-/// including ones whose shell has exited (kept, with scrollback, until closed).
-export function listTerminals(): { terminals: TerminalInfo[] } {
-  return { terminals: sshTermList() };
-}
-
-/// `POST /terminal-close` — end the shell and drop it.
-export function closeTerminal(args: any): { closed: string } {
-  const id = typeof args?.id === "string" ? args.id.trim() : "";
-  if (!id) throw new Error("`id` is required");
-  const t = sshTermClose(id);
+/// `terminal.host.resolve` — the connection for one host, by exact id.
+export function resolveTerminalHost(payload: any): { label: string; conn: unknown } {
+  const id = typeof payload?.host_id === "string" ? payload.host_id : "";
+  const rec = id ? getHost(id) : null;
+  if (!rec) throw new Error(`SSH Fleet has no host '${id}' (was it removed?)`);
   logActivity({
     ts: nowIso() ?? null,
-    host_id: t.host_id,
-    host_label: t.label,
+    host_id: rec.id,
+    host_label: rec.label,
     tool: "ssh_terminal",
-    summary: "closed interactive terminal",
+    summary: "interactive terminal connected",
     ok: true,
   });
-  return { closed: id };
+  return { label: rec.label || rec.hostname, conn: toConn(rec, defTimeout()) };
 }

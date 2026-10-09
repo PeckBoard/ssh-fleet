@@ -12,12 +12,12 @@ and drives them over MCP tools, with a **live activity dashboard**.
 - **Live dashboard** — a sidebar page ("SSH Fleet") that shows every command as
   it happens, filterable to one host or all hosts, with a searchable host picker
   built for large fleets.
-- **Interactive terminals** — open a real PTY shell on any host right in the
-  dashboard (xterm.js: arrows, tab-completion, `vim`/`htop`, copy/paste, resize).
-  The shell lives in Peckboard **core**, not the browser tab, so it keeps
-  running when you navigate away or reload — come back and the terminal
-  reattaches, replaying everything you missed. Several tabs can view the same
-  shell at once; it ends only when you close it or the remote exits.
+- **Interactive terminals** — every host is available to Peckboard's built-in
+  terminals (Terminals page, `t` shortcut, or the host's **Terminal** button
+  here): a real shell in a full-size app tab, run inside tmux on the host so it
+  survives Peckboard restarts and network drops. The plugin only answers the
+  `terminal.hosts.list` / `terminal.host.resolve` hooks; credentials go to core
+  in memory at each connect and never reach the browser.
 
 SSH itself runs through **native host functions in Peckboard core** (a pure-Rust
 `russh` client), so credentials stay in memory and are never written to disk.

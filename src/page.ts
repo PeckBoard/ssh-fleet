@@ -152,28 +152,7 @@ export const PAGE = `<!doctype html>
   .toast { position: fixed; bottom: 16px; right: 16px; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; z-index: 60; max-width: 420px; display: none; }
   .toast.open { display: block; }
 
-  /* ── tabs + interactive terminals ── */
-  .tabs { display: flex; gap: 2px; padding: 6px 10px 0; border-bottom: 1px solid var(--line); background: var(--panel); overflow-x: auto; flex: 0 0 auto; }
-  .tab { display: flex; align-items: center; gap: 6px; padding: 5px 10px; border: 1px solid transparent; border-bottom: none; border-radius: 6px 6px 0 0; cursor: pointer; color: var(--muted); font-size: 12px; white-space: nowrap; max-width: 240px; }
-  .tab:hover { background: var(--panel2); }
-  .tab.active { background: var(--bg); border-color: var(--line); color: var(--fg); margin-bottom: -1px; }
-  .tab .tlabel { overflow: hidden; text-overflow: ellipsis; }
-  .tab .tdot { width: 7px; height: 7px; border-radius: 50%; background: var(--idle); flex: 0 0 auto; }
-  .tab.live .tdot { background: var(--ok); }
-  .tab.exited .tdot { background: var(--err); }
-  .tab.exited .tlabel { text-decoration: line-through; }
-  .tab .tclose { padding: 0 4px; font-size: 11px; border: none; background: transparent; color: var(--muted); line-height: 1; }
-  .tab .tclose:hover { color: var(--err); border-color: transparent; }
   .pane { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-  .termpanes { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-  .termpane { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-  .termbar { display: flex; align-items: center; gap: 10px; padding: 6px 12px; border-bottom: 1px solid var(--line); background: var(--panel); font-size: 12px; flex: 0 0 auto; }
-  .termbar .termhost { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--fg); }
-  .termbar .spacer { flex: 1; }
-  .termstatus { color: var(--muted); }
-  .termstatus.live { color: var(--ok); } .termstatus.exited { color: var(--err); font-weight: 600; } .termstatus.err { color: var(--warn); }
-  .termmount { flex: 1; min-height: 0; padding: 6px 0 0 6px; }
-  .termmount .xterm { height: 100%; }
 
   /* ── mobile (iframe ≤760px wide, e.g. phones) ── */
   @media (hover: none), (pointer: coarse) {
@@ -227,9 +206,6 @@ export const PAGE = `<!doctype html>
     <div class="hosts" id="hostList"><div class="empty">Loading…</div></div>
   </aside>
   <main>
-    <div class="tabs" id="tabs">
-      <div class="tab active" data-tab="activity" data-testid="tab-activity"><span class="tlabel">Activity</span></div>
-    </div>
     <div class="pane" id="activityPane">
       <div class="runbar">
         <div class="combo runcombo" id="runCombo">
@@ -247,7 +223,6 @@ export const PAGE = `<!doctype html>
         <div class="empty" id="feedEmpty">No activity yet. Run a command to see it here, live.</div>
       </div>
     </div>
-    <div class="termpanes" id="termPanes" style="display:none"></div>
   </main>
 </div>
 
@@ -626,264 +601,11 @@ export const PAGE = `<!doctype html>
   }
 
   // ── interactive terminals ─────────────────────────────────────────
-  // The shells live in CORE and survive navigating away from this page: the
-  // page only attaches a viewer over /ws/terminal, authenticated by a
-  // one-time plugin-scoped ticket the parent mints (same bridge as
-  // /ws/plugin-ui). On attach the server replays the scrollback, then
-  // streams live output; keystrokes go back as binary frames, resizes as
-  // JSON. xterm.js is served by core at /vendor/xterm/* (no CDN) and loaded
-  // on first use.
-  var terms = {}; // id -> { info, tab, pane, bar, status, mount, term, fit, ws, exited, closing, hadHello }
-  var activeTab = "activity";
-  var xtermLoading = null;
-  var utf8enc = new TextEncoder();
-
-  function loadScript(src) {
-    return new Promise(function (resolve, reject) {
-      var s = document.createElement("script"); s.src = src; s.async = true;
-      s.onload = function () { resolve(); };
-      s.onerror = function () { reject(new Error("failed to load " + src)); };
-      document.head.appendChild(s);
-    });
-  }
-  function loadXterm() {
-    if (xtermLoading) return xtermLoading;
-    var css = document.createElement("link"); css.rel = "stylesheet"; css.href = "/vendor/xterm/xterm.css";
-    document.head.appendChild(css);
-    xtermLoading = loadScript("/vendor/xterm/xterm.js")
-      .then(function () { return loadScript("/vendor/xterm/addon-fit.js"); })
-      .catch(function (e) { xtermLoading = null; throw e; });
-    return xtermLoading;
-  }
-
-  // Ticket replies carry no correlation id on the bridge, so hand them out
-  // in request order.
-  var ticketWaiters = [];
-  window.addEventListener("message", function (e) {
-    var m = e.data;
-    if (m && m.type === "plugin-ui-ws-ticket-result") {
-      var w = ticketWaiters.shift();
-      if (w) w(m.ticket || null);
-    }
-  });
-  function getTicket() {
-    return new Promise(function (resolve) {
-      ticketWaiters.push(resolve);
-      window.parent.postMessage({ type: "plugin-ui-ws-ticket" }, "*");
-    });
-  }
-
-  function isDark() {
-    var t = document.documentElement.dataset.theme;
-    if (t === "dark") return true;
-    if (t === "light") return false;
-    return window.matchMedia("(prefers-color-scheme: dark)").matches;
-  }
-  function termTheme() {
-    return isDark()
-      ? { background: "#0f1419", foreground: "#e6edf3", cursor: "#e6edf3", selectionBackground: "rgba(76,155,232,.35)" }
-      : { background: "#ffffff", foreground: "#1f2328", cursor: "#1f2328", selectionBackground: "rgba(9,105,218,.25)" };
-  }
-
-  function activateTab(id) {
-    if (id !== "activity" && !terms[id]) id = "activity";
-    activeTab = id;
-    var tabs = $("tabs").children;
-    for (var i = 0; i < tabs.length; i++) tabs[i].classList.toggle("active", tabs[i].dataset.tab === id);
-    $("activityPane").style.display = id === "activity" ? "" : "none";
-    $("termPanes").style.display = id === "activity" ? "none" : "";
-    Object.keys(terms).forEach(function (k) { terms[k].pane.style.display = k === id ? "" : "none"; });
-    if (id !== "activity") attachTerminal(terms[id]);
-  }
-
-  function setTermStatus(t, text, kind) {
-    t.status.textContent = text;
-    t.status.className = "termstatus " + (kind || "");
-    t.status.dataset.testid = kind === "exited" ? "term-exited" : "term-status";
-    t.tab.classList.toggle("exited", kind === "exited");
-    t.tab.classList.toggle("live", kind === "live");
-  }
-
-  function addTerminalTab(info) {
-    var t = terms[info.id];
-    if (t) { t.info = info; if (info.exited && !t.exited) markExited(t, info.exited); return t; }
-    var tab = el("div", "tab"); tab.dataset.tab = info.id; tab.dataset.testid = "term-tab";
-    tab.appendChild(el("span", "tdot"));
-    tab.appendChild(el("span", "tlabel", info.label));
-    var x = el("button", "tclose", "✕"); x.title = "Close terminal"; x.dataset.testid = "term-tab-close";
-    x.onclick = function (ev) { ev.stopPropagation(); closeTerminal(info.id); };
-    tab.appendChild(x);
-    tab.onclick = function () { activateTab(info.id); };
-    $("tabs").appendChild(tab);
-
-    var pane = el("div", "termpane"); pane.dataset.term = info.id; pane.dataset.testid = "term-pane"; pane.style.display = "none";
-    var bar = el("div", "termbar");
-    bar.appendChild(el("span", "termhost", info.host));
-    var status = el("span", "termstatus", "connecting…");
-    bar.appendChild(status);
-    bar.appendChild(el("span", "spacer"));
-    var closeBtn = el("button", null, "Close"); closeBtn.dataset.testid = "term-close";
-    closeBtn.onclick = function () { closeTerminal(info.id); };
-    bar.appendChild(closeBtn);
-    pane.appendChild(bar);
-    var mount = el("div", "termmount"); mount.style.background = termTheme().background;
-    pane.appendChild(mount);
-    $("termPanes").appendChild(pane);
-
-    t = { info: info, tab: tab, pane: pane, bar: bar, status: status, mount: mount, term: null, fit: null, ws: null, exited: null, closing: false, hadHello: false };
-    terms[info.id] = t;
-    if (info.exited) markExited(t, info.exited);
-    return t;
-  }
-
-  function markExited(t, exit) {
-    t.exited = exit || { code: null, reason: "exited" };
-    var code = t.exited.code != null ? " (exit " + t.exited.code + ")" : "";
-    setTermStatus(t, "shell exited" + code + " · " + (t.exited.reason || ""), "exited");
-    if (t.term) t.term.options.cursorBlink = false;
-  }
-
-  function attachTerminal(t) {
-    if (t.term) { fitTerm(t); t.term.focus(); return; }
-    loadXterm().then(function () {
-      if (!terms[t.info.id] || t.term) return;
-      var term = new window.Terminal({
-        cursorBlink: !t.exited, scrollback: 5000, fontSize: 13,
-        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-        theme: termTheme()
-      });
-      var fit = new window.FitAddon.FitAddon();
-      term.loadAddon(fit);
-      term.open(t.mount);
-      t.term = term; t.fit = fit;
-      term.onData(function (d) { if (t.ws && t.ws.readyState === 1 && !t.exited) t.ws.send(utf8enc.encode(d)); });
-      term.onBinary(function (d) {
-        if (!t.ws || t.ws.readyState !== 1 || t.exited) return;
-        var b = new Uint8Array(d.length);
-        for (var i = 0; i < d.length; i++) b[i] = d.charCodeAt(i) & 255;
-        t.ws.send(b);
-      });
-      term.onResize(function (sz) { sendResize(t, sz.cols, sz.rows); });
-      term.attachCustomKeyEventHandler(function (ev) { return termKeys(t, ev); });
-      fitTerm(t);
-      connectTerminal(t);
-      term.focus();
-    }).catch(function (e) { setTermStatus(t, "terminal assets failed: " + e.message, "err"); });
-  }
-
-  // Copy/paste: Ctrl/Cmd+Shift+C copies the selection; Ctrl/Cmd+Shift+V and
-  // the platform paste shortcut paste through the browser's paste event,
-  // which xterm handles itself. Plain Ctrl+C stays ^C for the shell.
-  function termKeys(t, ev) {
-    if (ev.type !== "keydown") return true;
-    var mod = ev.ctrlKey || ev.metaKey;
-    if (mod && ev.shiftKey && (ev.key === "C" || ev.key === "c")) {
-      var sel = t.term.getSelection();
-      if (sel) copyText(sel);
-      return false;
-    }
-    return true;
-  }
-  function copyText(text) {
-    try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).catch(function () { fallbackCopy(text); });
-        return;
-      }
-    } catch (_e) { /* fall through */ }
-    fallbackCopy(text);
-  }
-  function fallbackCopy(text) {
-    var ta = document.createElement("textarea"); ta.value = text;
-    ta.style.position = "fixed"; ta.style.opacity = "0";
-    document.body.appendChild(ta); ta.select();
-    try { document.execCommand("copy"); } catch (_e) { /* best effort */ }
-    document.body.removeChild(ta);
-  }
-
-  function fitTerm(t) {
-    if (!t.fit || t.pane.style.display === "none") return;
-    try { t.fit.fit(); } catch (_e) { /* not laid out yet */ }
-  }
-  function fitActive() { if (terms[activeTab]) fitTerm(terms[activeTab]); }
-  function sendResize(t, cols, rows) {
-    if (t.ws && t.ws.readyState === 1) t.ws.send(JSON.stringify({ type: "resize", cols: cols, rows: rows }));
-  }
-
-  function connectTerminal(t) {
-    if (t.closing || !terms[t.info.id]) return;
-    if (!t.exited) setTermStatus(t, "connecting…", "");
-    getTicket().then(function (ticket) {
-      if (t.closing || !terms[t.info.id]) return;
-      if (!ticket) { setTermStatus(t, "could not get a connection ticket", "err"); return; }
-      var proto = location.protocol === "https:" ? "wss:" : "ws:";
-      var ws = new WebSocket(proto + "//" + location.host + "/ws/terminal?ticket=" + encodeURIComponent(ticket) + "&term=" + encodeURIComponent(t.info.id));
-      ws.binaryType = "arraybuffer";
-      t.ws = ws;
-      var resync = false;
-      ws.onopen = function () {
-        if (!t.exited) setTermStatus(t, "live", "live");
-        if (t.term) sendResize(t, t.term.cols, t.term.rows);
-      };
-      ws.onmessage = function (ev) {
-        if (typeof ev.data === "string") {
-          var m; try { m = JSON.parse(ev.data); } catch (_e) { return; }
-          if (m.type === "hello") {
-            // A re-attach replays the whole scrollback: start from a clean screen.
-            if (t.hadHello && t.term) t.term.reset();
-            t.hadHello = true;
-            if (m.terminal && m.terminal.exited) markExited(t, m.terminal.exited);
-          } else if (m.type === "exited") {
-            markExited(t, { code: m.code, reason: m.reason });
-          } else if (m.type === "resync") {
-            resync = true;
-          }
-        } else if (t.term) {
-          t.term.write(new Uint8Array(ev.data));
-        }
-      };
-      ws.onclose = function () {
-        if (t.ws !== ws) return;
-        t.ws = null;
-        if (t.closing || !terms[t.info.id]) return;
-        if (resync) { connectTerminal(t); return; }
-        if (t.exited) return;
-        setTermStatus(t, "disconnected — reconnecting…", "err");
-        setTimeout(function () { if (!t.ws) connectTerminal(t); }, 2000);
-      };
-    });
-  }
-
+  // Shells are a Peckboard core feature: a full-size tab in the main app,
+  // tmux-persistent. This page only asks the app to open one on a host; the
+  // app resolves the host through this plugin's terminal.host.resolve hook.
   function openTerminal(h) {
-    postJSON(API + "/terminals", { host: h.id, cols: 120, rows: 32 }).then(function (r) {
-      var t = addTerminalTab(r.terminal);
-      activateTab(t.info.id);
-      poll();
-    }).catch(function (e) { toast("Terminal failed: " + e.message); poll(); loadHosts(); });
-  }
-  // Terminals core still holds (opened before a reload / in another tab):
-  // add their tabs; drop tabs for ones core no longer knows.
-  function loadTerminals() {
-    return getJSON(API + "/terminals").then(function (d) {
-      var seen = {};
-      (d.terminals || []).forEach(function (info) { seen[info.id] = true; addTerminalTab(info); });
-      Object.keys(terms).forEach(function (id) { if (!seen[id]) dropTerminal(id); });
-    }).catch(function () { /* transient; keep what we have */ });
-  }
-  function dropTerminal(id) {
-    var t = terms[id]; if (!t) return;
-    t.closing = true;
-    if (t.ws) { try { t.ws.close(); } catch (_e) { /* already closed */ } t.ws = null; }
-    if (t.term) { try { t.term.dispose(); } catch (_e) { /* already disposed */ } t.term = null; }
-    t.tab.remove(); t.pane.remove();
-    delete terms[id];
-    if (activeTab === id) activateTab("activity");
-  }
-  function closeTerminal(id) {
-    var t = terms[id]; if (!t) return;
-    if (!t.exited && !confirm("Close the terminal on '" + t.info.label + "'? The remote shell will be terminated.")) return;
-    postJSON(API + "/terminal-close", { id: id }).then(function () { dropTerminal(id); poll(); })
-      .catch(function (e) { toast("Close failed: " + e.message); dropTerminal(id); });
+    window.parent.postMessage({ type: "plugin-ui-open-terminal", hostId: h.id }, "*");
   }
 
   // ── wire up ────────────────────────────────────────────────────────
@@ -901,14 +623,10 @@ export const PAGE = `<!doctype html>
     $("liveBtn").textContent = state.live ? "⏸ Pause" : "▶ Live";
   };
   $("backdrop").addEventListener("mousedown", function (e) { if (e.target === $("backdrop")) closeModal(); });
-  $("tabs").firstElementChild.onclick = function () { activateTab("activity"); };
-  window.addEventListener("resize", fitActive);
-  if (window.ResizeObserver) new ResizeObserver(fitActive).observe($("termPanes"));
 
   loadHosts().then(function () { setFilter("all"); });
-  loadTerminals();
   setInterval(function () { if (state.live) poll(); }, 2000);
-  setInterval(function () { loadHosts(); loadTerminals(); }, 15000); // refresh host statuses + terminals periodically
+  setInterval(function () { loadHosts(); }, 15000); // refresh host statuses periodically
 })();
 </script>
 </body>

@@ -8,6 +8,7 @@
 
 import { skip, allow, cancel, defer, isDeferReq, errMsg } from "./verdict";
 import { serveHttp, serveAuthed } from "./http";
+import { terminalHosts, resolveTerminalHost } from "./terminals";
 import {
   sshHostAdd,
   sshHostUpdate,
@@ -62,6 +63,15 @@ export function dispatch(hook: string, payload: any): string {
       return serveHttp(payload);
     case "http.request.authed":
       return serveAuthed(payload);
+    // Core's interactive terminals ask us for hosts / a host's connection.
+    case "terminal.hosts.list":
+      return allow(terminalHosts());
+    case "terminal.host.resolve":
+      try {
+        return allow(resolveTerminalHost(payload));
+      } catch (e) {
+        return cancel(errMsg(e));
+      }
     default:
       return skip();
   }
