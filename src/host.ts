@@ -120,6 +120,51 @@ export function sshWriteFile(conn: SshConn, path: string, contentBase64: string)
 } {
   return hostCall("peckboard_ssh_write_file", { ...conn, path, content_base64: contentBase64 });
 }
+// ── Interactive terminals (ssh permission) ──────────────────────────────────
+
+/// How a shell ended, as core reports it.
+export interface TerminalExit {
+  code: number | null;
+  reason: string;
+}
+
+/// Core's secret-free view of one open terminal (PTY shell). Terminals live
+/// in core, scoped to this plugin, and outlive the dashboard page; the page
+/// attaches to one over `/ws/terminal` with a plugin-scoped ticket.
+export interface TerminalInfo {
+  id: string;
+  plugin_id: string;
+  label: string;
+  host: string; // user@host:port — identity only
+  host_id: string | null; // our host record id (opaque to core)
+  created_at: string;
+  cols: number;
+  rows: number;
+  exited: TerminalExit | null;
+}
+
+/// Open a PTY shell on the host. Credentials travel only into this call;
+/// core keeps the connection and never echoes them back.
+export function sshTermOpen(
+  conn: SshConn,
+  opts: { label: string; host_id: string; cols?: number; rows?: number },
+): TerminalInfo {
+  const result = hostCall("peckboard_ssh_term_open", { ...conn, ...opts });
+  return result.terminal as TerminalInfo;
+}
+
+/// The terminals this plugin has open (oldest first).
+export function sshTermList(): TerminalInfo[] {
+  const result = hostCall("peckboard_ssh_term_list", {});
+  return result?.terminals ?? [];
+}
+
+/// End a shell and forget it (its scrollback goes too).
+export function sshTermClose(id: string): TerminalInfo {
+  const result = hostCall("peckboard_ssh_term_close", { id });
+  return result.terminal as TerminalInfo;
+}
+
 
 // ── SSH key vault (ssh_keys permission) ──────────────────────────────────────
 

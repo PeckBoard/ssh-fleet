@@ -8,7 +8,8 @@ const DESCRIPTION =
   "over MCP tools — run commands on one host or across the whole fleet, " +
   "read/write/edit remote files — all through native SSH in Peckboard core (keys " +
   "stay in memory). Ships a live activity dashboard showing every command per-host " +
-  "and across all hosts.";
+  "and across all hosts, plus interactive terminals: open a real shell on any host " +
+  "in the dashboard, and it stays open in core while you navigate away.";
 // Single source of truth for the version: package.json (bundled in by
 // esbuild/vitest via resolveJsonModule). Never hardcode a version here — a
 // manifest that self-reports an old version makes the registry's
@@ -42,7 +43,7 @@ export function manifestJson(): string {
 
     permissions: [
       "provide_mcp_tools", // the ssh_* MCP tools
-      "ssh", // peckboard_ssh_probe / _exec / _read_file / _write_file
+      "ssh", // peckboard_ssh_probe / _exec / _read_file / _write_file / _term_open / _term_list / _term_close
       "ssh_keys", // peckboard_ssh_key_list + auth by vault key id (never key material)
       "data_store", // host registry + activity log
       "user_authority", // serve the authenticated dashboard data routes
@@ -64,6 +65,9 @@ export function manifestJson(): string {
       "GET /api/plugin-ui/ssh-fleet/activity",
       "POST /api/plugin-ui/ssh-fleet/probe",
       "POST /api/plugin-ui/ssh-fleet/run",
+      "GET /api/plugin-ui/ssh-fleet/terminals",
+      "POST /api/plugin-ui/ssh-fleet/terminals",
+      "POST /api/plugin-ui/ssh-fleet/terminal-close",
     ],
 
     settings: [
